@@ -19,14 +19,24 @@ type Selection =
   | { type: 'HAND'; pieceType: PieceType }
   | null;
 
+// Deploy Modal State
+type DeployModalState = {
+  type: PieceType;
+  to: Location;
+  max: number;
+  current: number;
+} | null;
+
 export default function App() {
   const [gameState, setGameState] = useState<GameState>(initRandomGame());
   const [selection, setSelection] = useState<Selection>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // State for Interaction Modal (Capture or Merge)
-  // Stores from/to and whether the target is friendly
   const [pendingInteraction, setPendingInteraction] = useState<{from: Location, to: Location, isFriendly: boolean} | null>(null);
+
+  // State for Deploy Modal
+  const [deployModal, setDeployModal] = useState<DeployModalState>(null);
 
   const activePlayer = gameState.players[gameState.activePlayerIndex];
   const isChainActive = !!gameState.pendingChainCapture;
@@ -41,7 +51,7 @@ export default function App() {
 
   const handleBoardClick = (loc: Location) => {
     // If Modal is open, block board interaction
-    if (pendingInteraction) return;
+    if (pendingInteraction || deployModal) return;
 
     // 1. Chain Capture Lock (连吃锁定)
     if (isChainActive) {
@@ -103,18 +113,32 @@ export default function App() {
 
     // 4. Hand Piece Selected -> Deploy (已选中手牌 -> 部署)
     if (selection.type === 'HAND') {
-      executeAction({
-        type: ActionType.DEPLOY,
-        playerId: gameState.activePlayerIndex,
-        deployType: selection.pieceType,
-        deployCount: 1, // Default 1 for UI simplicity
-        deployTo: loc
-      });
+      // Check count of this piece type in hand
+      const count = activePlayer.hand.pieces.filter(p => p.type === selection.pieceType).length;
+      
+      if (count > 1) {
+        // Open Batch Deploy Modal
+        setDeployModal({
+          type: selection.pieceType,
+          to: loc,
+          max: count,
+          current: 1
+        });
+      } else {
+        // Direct Deploy
+        executeAction({
+          type: ActionType.DEPLOY,
+          playerId: gameState.activePlayerIndex,
+          deployType: selection.pieceType,
+          deployCount: 1,
+          deployTo: loc
+        });
+      }
     }
   };
 
   const handleHandSelect = (type: PieceType) => {
-    if (isChainActive || pendingInteraction) return;
+    if (isChainActive || pendingInteraction || deployModal) return;
     
     if (selection?.type === 'HAND' && selection.pieceType === type) {
       setSelection(null); // Toggle off
@@ -124,7 +148,7 @@ export default function App() {
   };
 
   const handlePass = () => {
-    if (!isChainActive || pendingInteraction) return;
+    if (!isChainActive || pendingInteraction || deployModal) return;
     executeAction({
       type: ActionType.PASS,
       playerId: gameState.activePlayerIndex
@@ -175,6 +199,19 @@ export default function App() {
     setPendingInteraction(null);
   };
 
+  // Deploy Modal Functions
+  const confirmDeploy = () => {
+    if (!deployModal) return;
+    executeAction({
+      type: ActionType.DEPLOY,
+      playerId: gameState.activePlayerIndex,
+      deployType: deployModal.type,
+      deployCount: deployModal.current,
+      deployTo: deployModal.to
+    });
+    setDeployModal(null);
+  };
+
   const executeAction = (action: PlayerAction) => {
     const newState = applyAction(gameState, action);
     
@@ -196,6 +233,7 @@ export default function App() {
        setGameState(initRandomGame());
        setSelection(null);
        setPendingInteraction(null);
+       setDeployModal(null);
        setErrorMsg(null);
     }
   }
@@ -308,8 +346,47 @@ export default function App() {
           </div>
         )}
 
+        {/* Batch Deploy Modal */}
+        {deployModal && (
+           <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 rounded backdrop-blur-sm">
+             <div className="bg-slate-800 p-4 rounded-xl border-2 border-emerald-500 shadow-2xl w-64 flex flex-col gap-4">
+                <h3 className="text-center font-bold text-emerald-400 text-lg">
+                  批量部署 ({deployModal.type})
+                </h3>
+                
+                <div className="flex flex-col items-center gap-2">
+                   <div className="text-4xl font-bold text-white">{deployModal.current}</div>
+                   <div className="text-xs text-slate-400">数量选择 (Max: {deployModal.max})</div>
+                   <input 
+                      type="range" 
+                      min="1" 
+                      max={deployModal.max} 
+                      value={deployModal.current}
+                      onChange={(e) => setDeployModal({...deployModal, current: parseInt(e.target.value)})}
+                      className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                   />
+                </div>
+
+                <div className="flex gap-2">
+                   <button 
+                     onClick={() => setDeployModal(null)}
+                     className="flex-1 bg-slate-600 hover:bg-slate-500 text-white py-2 rounded font-bold text-xs"
+                   >
+                     取消
+                   </button>
+                   <button 
+                     onClick={confirmDeploy}
+                     className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded font-bold text-xs"
+                   >
+                     确认部署
+                   </button>
+                </div>
+             </div>
+           </div>
+        )}
+
         {/* Chain Capture Overlay */}
-        {isChainActive && !pendingInteraction && (
+        {isChainActive && !pendingInteraction && !deployModal && (
            <div className="absolute -bottom-16 left-0 w-full flex flex-col items-center animate-pulse">
               <div className="bg-orange-600 text-white px-4 py-1 rounded-t font-bold text-sm">
                 触发连吃!

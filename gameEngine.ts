@@ -10,7 +10,6 @@ import {
   PieceStack,
   INITIAL_PIECE_COUNTS,
   STACK_LIMITS,
-  PIECE_RANKS,
   Location,
   CaptureResolution,
 } from './types';
@@ -213,7 +212,7 @@ const getMovePatternDetails = (board: Board, from: Location, to: Location, baseT
 
 /**
  * Can the piece at 'from' interact with the target at 'to'?
- * - If Enemy: Checks Rank/Weight.
+ * - If Enemy: Checks Weight >= Weight.
  * - If Friend: Always true (assuming pattern is valid), because we can Retrieve/Merge.
  */
 const canPieceCaptureTarget = (board: Board, from: Location, to: Location, attackerStack: PieceStack, defenderStack: PieceStack): boolean => {
@@ -228,32 +227,11 @@ const canPieceCaptureTarget = (board: Board, from: Location, to: Location, attac
   // Friendly? Always "Capture-able" (Retrieve/Merge)
   if (atkTop.color === defTop.color) return true;
 
-  // Enemy Logic
+  // Enemy Logic (Weight Only)
   const atkWeight = getStackWeight(attackerStack);
   const defWeight = getStackWeight(defenderStack);
 
-  if (atkWeight > defWeight) return true;
-  if (atkWeight < defWeight) return false;
-
-  // Weights Equal -> Check Rank
-  const atkRank = PIECE_RANKS[atkTop.type];
-  const defRank = PIECE_RANKS[defTop.type];
-
-  // Cannon Exception: Jump ignores Rank check on tie
-  if (baseType === PieceType.CANNON && pattern.screens === 1) {
-    return true; 
-  }
-
-  // Soldier Exception: Soldier(0) beats General(6)
-  if (atkTop.type === PieceType.SOLDIER && defTop.type === PieceType.GENERAL) {
-    return true;
-  }
-  // General cannot eat Soldier
-  if (atkTop.type === PieceType.GENERAL && defTop.type === PieceType.SOLDIER) {
-    return false; 
-  }
-
-  return atkRank >= defRank;
+  return atkWeight >= defWeight;
 };
 
 /**
@@ -414,9 +392,11 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
             // If Friend: "Retrieve Friend" (Eat friendly to save/chain).
             
             if (!isFriendly) {
-               // Check Enemy Capture Validity
+               // Check Enemy Capture Validity (Weight only)
                if (!canPieceCaptureTarget(newState.board, from, to, srcStack, destStack)) {
-                   return fail(newState, "Capture failed (Rank/Weight insufficient)");
+                   const atkWeight = getStackWeight(srcStack);
+                   const defWeight = getStackWeight(destStack);
+                   return fail(newState, `层数不足：我方(${atkWeight}) vs 敌方(${defWeight})`);
                }
                // Cannon Check
                if (baseType === PieceType.CANNON && pattern.screens > 1) return fail(newState, "Invalid Cannon capture");
@@ -437,21 +417,21 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
             // If Friend: "Merge" (Join forces).
 
             // Check Stack Validity
-            // canStackOn param 3 (checkColor): If Friendly, true. If Enemy, false (we force stack).
             const stackCheck = canStackOn(destStack.pieces, srcStack.pieces, isFriendly);
             if (!stackCheck.valid) return fail(newState, `Cannot stack: ${stackCheck.reason}`);
 
             if (!isFriendly) {
                 // Enemy Capture checks
                 if (!canPieceCaptureTarget(newState.board, from, to, srcStack, destStack)) {
-                   return fail(newState, "Capture failed (Rank/Weight insufficient)");
+                   const atkWeight = getStackWeight(srcStack);
+                   const defWeight = getStackWeight(destStack);
+                   return fail(newState, `层数不足：我方(${atkWeight}) vs 敌方(${defWeight})`);
                 }
                 // Cannon Check
                 if (baseType === PieceType.CANNON && pattern.screens > 1) return fail(newState, "Invalid Cannon capture");
             }
 
             // Execute Stack
-            // Source goes ON TOP of Dest
             const combined = [...destStack.pieces, ...srcStack.pieces];
             newState.board[to.row][to.col] = { pieces: combined };
             newState.board[from.row][from.col] = null;
@@ -460,8 +440,11 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
 
       // --- Post Move: Chain Logic ---
       // If we interacted (Captured/Merged/Retrieved), check if we can do it again!
-      // IMPORTANT: Check from the NEW position ('to') using the NEW stack state.
-      if (moveIsInteraction && hasChainOptions(newState, to, player.color)) {
+      const resultingStack = newState.board[to.row][to.col];
+      // Check identity of the new stack. If it is SOLDIER, chaining is forbidden.
+      const resultingBaseType = resultingStack ? getStackBaseType(resultingStack.pieces) : PieceType.SOLDIER;
+
+      if (moveIsInteraction && resultingBaseType !== PieceType.SOLDIER && hasChainOptions(newState, to, player.color)) {
         newState.pendingChainCapture = to;
         newState.lastAction = action; 
         // Do NOT increment turn count
@@ -644,7 +627,6 @@ export const getLegalActions = (state: GameState, playerIndex: number): PlayerAc
               if (tTop && tTop.faceUp) { 
                  // Can interact with any face up piece (Friendly or Enemy)
                  if (canPieceCaptureTarget(state.board, {row, col}, {row:tr, col:tc}, stack, target)) {
-                    // Add standard Capture/Retrieve action
                     actions.push({
                       type: ActionType.MOVE,
                       playerId: playerIndex,
@@ -733,7 +715,7 @@ export const getLegalActions = (state: GameState, playerIndex: number): PlayerAc
                 if (canStackOn(targetStack.pieces, stack.pieces, true).valid) {
                     actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r,col:c}, to: {row:tr,col:tc}, captureResolution: CaptureResolution.STACK_IF_POSSIBLE });
                 }
-                // Retrieve Friend (Capture to Hand) - Always possible for friends
+                // Retrieve Friend (Capture to Hand)
                 actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r,col:c}, to: {row:tr,col:tc}, captureResolution: CaptureResolution.TO_HAND });
              } else {
                 // Enemy
