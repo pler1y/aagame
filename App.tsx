@@ -7,7 +7,8 @@ import {
   PieceType, 
   PlayerAction, 
   CaptureResolution, 
-  Color 
+  Color,
+  PieceInstance
 } from './types';
 import { BoardView } from './BoardView';
 import { HandView } from './HandView';
@@ -22,6 +23,9 @@ export default function App() {
   const [gameState, setGameState] = useState<GameState>(initRandomGame());
   const [selection, setSelection] = useState<Selection>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  
+  // State for Capture Modal
+  const [pendingCapture, setPendingCapture] = useState<{from: Location, to: Location} | null>(null);
 
   const activePlayer = gameState.players[gameState.activePlayerIndex];
   const isChainActive = !!gameState.pendingChainCapture;
@@ -35,28 +39,31 @@ export default function App() {
   }, [errorMsg]);
 
   const handleBoardClick = (loc: Location) => {
-    // 1. Chain Capture Lock
+    // If Modal is open, block board interaction
+    if (pendingCapture) return;
+
+    // 1. Chain Capture Lock (连吃锁定)
     if (isChainActive) {
-       // Only allow clicking the chainer (to select) or a target
        const chainerLoc = gameState.pendingChainCapture!;
        
+       // Allow re-selecting the chaining piece
        if (loc.row === chainerLoc.row && loc.col === chainerLoc.col) {
-         setSelection({ type: 'BOARD', loc }); // Re-select chainer
+         setSelection({ type: 'BOARD', loc }); 
          return;
        }
        
-       // If we have the chainer selected, try to move
+       // If we have the chainer selected, try to move/capture
        if (selection?.type === 'BOARD' && 
            selection.loc.row === chainerLoc.row && 
            selection.loc.col === chainerLoc.col) {
-          executeMove(selection.loc, loc);
+          attemptMove(selection.loc, loc);
        }
        return;
     }
 
     const cellStack = gameState.board[loc.row][loc.col];
 
-    // 2. No Selection -> Select or Flip
+    // 2. No Selection -> Select or Flip (未选中时：翻牌或选中)
     if (!selection) {
       if (!cellStack || cellStack.pieces.length === 0) return; // Clicked empty air
 
@@ -73,10 +80,8 @@ export default function App() {
       }
 
       // Select Logic (Own pieces only)
-      // Note: Before colors assigned, any face-up piece is technically valid to click visually, 
-      // but logic prevents moving enemy.
       if (gameState.colorsAssigned && top.color !== activePlayer.color) {
-        triggerError("Not your piece!");
+        triggerError("这不是你的棋子！");
         return;
       }
       
@@ -84,7 +89,7 @@ export default function App() {
       return;
     }
 
-    // 3. Board Piece Selected -> Move / Merge / Capture / Retrieve?
+    // 3. Board Piece Selected -> Move / Merge / Capture (已选中棋盘棋子 -> 移动/合并/吃子)
     if (selection.type === 'BOARD') {
       // Clicked self -> Deselect
       if (selection.loc.row === loc.row && selection.loc.col === loc.col) {
@@ -92,14 +97,10 @@ export default function App() {
         return;
       }
       
-      // Retrieve Check (Simplified: Clicking own piece doesn't auto-retrieve, just re-selects usually)
-      // If clicking another FRIENDLY piece -> Re-select that one (if not merging)
-      // The engine handles Merge inside MOVE. 
-      // We just try to Move.
-      executeMove(selection.loc, loc);
+      attemptMove(selection.loc, loc);
     }
 
-    // 4. Hand Piece Selected -> Deploy
+    // 4. Hand Piece Selected -> Deploy (已选中手牌 -> 部署)
     if (selection.type === 'HAND') {
       executeAction({
         type: ActionType.DEPLOY,
@@ -112,7 +113,7 @@ export default function App() {
   };
 
   const handleHandSelect = (type: PieceType) => {
-    if (isChainActive) return;
+    if (isChainActive || pendingCapture) return;
     
     if (selection?.type === 'HAND' && selection.pieceType === type) {
       setSelection(null); // Toggle off
@@ -122,46 +123,82 @@ export default function App() {
   };
 
   const handlePass = () => {
-    if (!isChainActive) return;
+    if (!isChainActive || pendingCapture) return;
     executeAction({
       type: ActionType.PASS,
       playerId: gameState.activePlayerIndex
     });
   };
 
-  const executeMove = (from: Location, to: Location) => {
-    // Default resolution TO_HAND. 
-    // In a full implementation, we'd check if it's a valid capture first,
-    // then prompt the user if they want to stack or harvest.
+  // Replaces direct executeAction for Moves to handle Capture Choice
+  const attemptMove = (from: Location, to: Location) => {
+    const targetStack = gameState.board[to.row][to.col];
+    
+    let isEnemyCapture = false;
+    if (targetStack && targetStack.pieces.length > 0) {
+       const topTarget = targetStack.pieces[targetStack.pieces.length - 1];
+       // If target is face up AND enemy color
+       if (topTarget.faceUp && gameState.colorsAssigned && topTarget.color !== activePlayer.color) {
+          isEnemyCapture = true;
+       }
+    }
+
+    if (isEnemyCapture) {
+      // Open Modal
+      setPendingCapture({ from, to });
+    } else {
+      // Normal Move or Friendly Merge (Engine handles merge logic)
+      executeAction({
+        type: ActionType.MOVE,
+        playerId: gameState.activePlayerIndex,
+        from,
+        to,
+        captureResolution: CaptureResolution.TO_HAND // Default value, won't be used for merges
+      });
+    }
+  };
+
+  const confirmCapture = (resolution: CaptureResolution) => {
+    if (!pendingCapture) return;
+    
     executeAction({
       type: ActionType.MOVE,
       playerId: gameState.activePlayerIndex,
-      from,
-      to,
-      captureResolution: CaptureResolution.TO_HAND 
+      from: pendingCapture.from,
+      to: pendingCapture.to,
+      captureResolution: resolution
     });
+    
+    setPendingCapture(null);
+  };
+
+  const cancelCapture = () => {
+    setPendingCapture(null);
+    // Do not clear selection, allow user to choose different target
   };
 
   const executeAction = (action: PlayerAction) => {
     const newState = applyAction(gameState, action);
     
     if (newState.error) {
+      // Basic translation of engine errors could go here if needed
       triggerError(newState.error);
     } else {
       setGameState(newState);
-      setSelection(null); // Clear selection on success
+      // Clear selection on success, EXCEPT if chain capture started
+      setSelection(null); 
     }
   };
 
   const triggerError = (msg: string) => {
     setErrorMsg(msg);
-    // Shake effect logic could go here
   };
 
   const handleRestart = () => {
-    if (confirm("Restart Game?")) {
+    if (confirm("确定要重新开始游戏吗？")) {
        setGameState(initRandomGame());
        setSelection(null);
+       setPendingCapture(null);
        setErrorMsg(null);
     }
   }
@@ -178,11 +215,13 @@ export default function App() {
       {/* Header */}
       <header className="w-full max-w-2xl flex justify-between items-center mb-4 px-4">
         <div>
-          <h1 className="text-2xl font-bold text-emerald-400">Stacking Xiangqi</h1>
-          <div className="text-xs text-slate-400">Turn: {gameState.turnCount} | Active: {gameState.activePlayerIndex === 0 ? 'Top' : 'Bottom'}</div>
+          <h1 className="text-2xl font-bold text-emerald-400">叠叠象棋 (Stacking Xiangqi)</h1>
+          <div className="text-xs text-slate-400">
+             回合: {gameState.turnCount} | 当前: {gameState.activePlayerIndex === 0 ? '上方玩家' : '下方玩家'}
+          </div>
         </div>
         <button onClick={handleRestart} className="bg-slate-700 hover:bg-slate-600 px-3 py-1 rounded text-sm">
-          Restart
+          重新开始
         </button>
       </header>
 
@@ -209,24 +248,57 @@ export default function App() {
 
         {/* Error Toast */}
         {errorMsg && (
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-red-600 text-white px-6 py-3 rounded-lg shadow-xl z-50 animate-bounce font-bold border-2 border-white">
+          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-red-600 text-white px-6 py-3 rounded-lg shadow-xl z-50 animate-bounce font-bold border-2 border-white text-center whitespace-nowrap">
              {errorMsg}
           </div>
         )}
 
+        {/* Capture Choice Modal */}
+        {pendingCapture && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 rounded backdrop-blur-sm">
+             <div className="bg-slate-800 p-4 rounded-xl border-2 border-orange-500 shadow-2xl w-64 flex flex-col gap-3 animate-in fade-in zoom-in duration-200">
+                <h3 className="text-center font-bold text-orange-400 text-lg">捕获敌方棋子!</h3>
+                <p className="text-xs text-center text-slate-300 mb-2">请选择处理方式:</p>
+                
+                <button 
+                  onClick={() => confirmCapture(CaptureResolution.TO_HAND)}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded font-bold text-sm flex flex-col items-center"
+                >
+                  <span>收为己用</span>
+                  <span className="text-[10px] font-normal opacity-80">(变色并入手牌)</span>
+                </button>
+
+                <button 
+                  onClick={() => confirmCapture(CaptureResolution.STACK_IF_POSSIBLE)}
+                  className="bg-blue-600 hover:bg-blue-500 text-white py-2 rounded font-bold text-sm flex flex-col items-center"
+                >
+                  <span>镇压叠加</span>
+                  <span className="text-[10px] font-normal opacity-80">(直接叠在下方)</span>
+                </button>
+
+                <button 
+                  onClick={cancelCapture}
+                  className="mt-2 text-slate-400 hover:text-white text-xs underline"
+                >
+                  取消操作
+                </button>
+             </div>
+          </div>
+        )}
+
         {/* Chain Capture Overlay */}
-        {isChainActive && (
+        {isChainActive && !pendingCapture && (
            <div className="absolute -bottom-16 left-0 w-full flex flex-col items-center animate-pulse">
               <div className="bg-orange-600 text-white px-4 py-1 rounded-t font-bold text-sm">
-                CHAIN CAPTURE!
+                触发连吃!
               </div>
               <div className="bg-slate-800 p-2 rounded-b border border-orange-500 flex gap-4 items-center shadow-lg">
-                 <span className="text-orange-300 text-sm">Continue capturing or...</span>
+                 <span className="text-orange-300 text-sm">请继续吃子或...</span>
                  <button 
                    onClick={handlePass}
                    className="bg-red-500 hover:bg-red-600 text-white px-4 py-1 rounded font-bold"
                  >
-                   End Turn (Pass)
+                   跳过 (结束回合)
                  </button>
               </div>
            </div>
@@ -246,26 +318,26 @@ export default function App() {
       {/* Status Footer */}
       <div className="text-center text-slate-500 text-xs">
          {gameState.colorsAssigned 
-           ? `P0: ${gameState.players[0].color} | P1: ${gameState.players[1].color}`
-           : "Flip a piece to assign colors."}
+           ? `红方: ${gameState.players[0].color === Color.RED ? 'Player 0' : 'Player 1'} | 黑方: ${gameState.players[0].color === Color.BLACK ? 'Player 0' : 'Player 1'}`
+           : "请翻开任意棋子以决定红黑阵营"}
       </div>
 
       {/* Game Over Modal */}
       {gameState.isGameOver && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="bg-slate-800 p-8 rounded-2xl border-4 border-emerald-500 text-center max-w-sm w-full mx-4 shadow-2xl">
-             <h2 className="text-4xl font-bold text-emerald-400 mb-4">Game Over</h2>
+             <h2 className="text-4xl font-bold text-emerald-400 mb-4">游戏结束</h2>
              <p className="text-xl text-white mb-8">
-               Winner: Player {gameState.winner !== null ? gameState.winner : '?'} 
+               获胜者: 玩家 {gameState.winner !== null ? gameState.winner : '?'} 
                <span className="block text-sm text-slate-400 mt-2">
-                 ({gameState.winner !== null ? gameState.players[gameState.winner].color : ''})
+                 ({gameState.winner !== null ? (gameState.players[gameState.winner].color === Color.RED ? '红方' : '黑方') : ''})
                </span>
              </p>
              <button 
                onClick={handleRestart}
                className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-bold text-lg transition-transform hover:scale-105"
              >
-               Play Again
+               再来一局
              </button>
           </div>
         </div>

@@ -24,14 +24,18 @@ export const HandView: React.FC<HandViewProps> = ({ player, isCurrentPlayer, sel
 
   const borderColor = player.color === Color.RED ? 'border-red-500' : (player.color === Color.BLACK ? 'border-slate-800' : 'border-slate-400');
   const bgClass = isCurrentPlayer ? 'bg-opacity-20 bg-yellow-200' : 'bg-transparent';
+  
+  const playerLabel = player.color === Color.UNKNOWN 
+    ? '未定阵营' 
+    : (player.color === Color.RED ? '红方手牌' : '黑方手牌');
 
   return (
     <div className={`flex flex-wrap gap-2 p-2 rounded-lg border-2 transition-colors ${borderColor} ${bgClass} min-h-[80px] items-center`}>
        <div className="mr-2 text-xs font-bold text-slate-500 uppercase w-full sm:w-auto text-center">
-          {player.color === Color.UNKNOWN ? 'Waiting...' : player.color} Hand
+          {playerLabel}
        </div>
        
-       {sortedGroups.length === 0 && <div className="text-xs text-slate-400 italic pl-2">Empty</div>}
+       {sortedGroups.length === 0 && <div className="text-xs text-slate-400 italic pl-2">无棋子</div>}
 
        {sortedGroups.map(group => (
          <div key={group.type} className="relative">
