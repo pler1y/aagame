@@ -1,3 +1,4 @@
+
 // types.ts
 
 export enum Color {
@@ -7,56 +8,59 @@ export enum Color {
 }
 
 export enum PieceType {
-  GENERAL = 'GENERAL', // 帅/将 (Rank 6)
-  ADVISOR = 'ADVISOR', // 仕/士 (Rank 5)
-  ELEPHANT = 'ELEPHANT', // 相/象 (Rank 4)
-  CHARIOT = 'CHARIOT', // 車 (Rank 3)
-  HORSE = 'HORSE', // 馬 (Rank 2)
-  CANNON = 'CANNON', // 炮 (Rank 1)
-  SOLDIER = 'SOLDIER', // 兵/卒 (Rank 0)
+  GENERAL = 'GENERAL', // 帅/将
+  ADVISOR = 'ADVISOR', // 仕/士
+  ELEPHANT = 'ELEPHANT', // 相/象
+  CHARIOT = 'CHARIOT', // 車
+  HORSE = 'HORSE', // 馬
+  CANNON = 'CANNON', // 炮
+  SOLDIER = 'SOLDIER', // 兵/卒
 }
 
 export interface PieceInstance {
-  id: string; // Unique ID for tracking
+  id: string; // Unique ID
   type: PieceType;
   color: Color;
-  faceUp: boolean; // Is the piece revealed?
+  faceUp: boolean;
 }
 
 export interface PieceStack {
-  pieces: PieceInstance[]; // Bottom is index 0, Top is last index
+  pieces: PieceInstance[]; // Index 0 is Bottom, Last Index is Top
 }
 
 export type Board = (PieceStack | null)[][];
 
 export interface HandState {
-  // We store actual instances to preserve IDs if they are returned from board
-  pieces: PieceInstance[]; 
+  pieces: PieceInstance[];
 }
 
 export interface PlayerState {
-  color: Color | null; // Null until determined
+  color: Color; // Strictly RED, BLACK, or UNKNOWN
   hand: HandState;
-  capturedPoints: number; // Optional: track score
 }
 
 export interface GameState {
   board: Board;
-  players: [PlayerState, PlayerState]; // Index 0 and 1
+  players: [PlayerState, PlayerState];
   activePlayerIndex: number; // 0 or 1
   colorsAssigned: boolean;
   turnCount: number;
   isGameOver: boolean;
-  winner: number | null; // Index of winner, or null
+  winner: number | null;
   lastAction: PlayerAction | null;
-  error: string | null; // To feedback logic errors
+  error: string | null;
 }
 
 export enum ActionType {
   FLIP = 'FLIP',
-  MOVE = 'MOVE', // Includes Capture if landing on enemy
+  MOVE = 'MOVE',
   DEPLOY = 'DEPLOY',
   RETRIEVE = 'RETRIEVE',
+}
+
+export enum CaptureResolution {
+  TO_HAND = 'TO_HAND',     // Harvest captured pieces to hand (Color Converts)
+  STACK_IF_POSSIBLE = 'STACK_IF_POSSIBLE', // Stack captured pieces under attacker (No Color Convert)
 }
 
 export interface Location {
@@ -66,7 +70,7 @@ export interface Location {
 
 export interface PlayerAction {
   type: ActionType;
-  playerId: number; // 0 or 1
+  playerId: number;
   
   // For FLIP
   flipLocation?: Location;
@@ -74,28 +78,31 @@ export interface PlayerAction {
   // For MOVE
   from?: Location;
   to?: Location;
+  captureResolution?: CaptureResolution; // Default to TO_HAND if undefined
 
   // For DEPLOY
-  deployPieceId?: string; // Which piece ID from hand
-  deployTo?: Location;
+  deployType?: PieceType; // Which type to deploy
+  deployCount?: number;   // How many
+  deployTo?: Location;    // Target grid
 
-  // For RETRIEVE (Harvesting own stack)
+  // For RETRIEVE
   retrieveFrom?: Location;
-  retrieveCount?: number; // How many from top?
+  retrievePieceIds?: string[]; // Which specific pieces to pull
 }
 
-// Helper for rank logic
-export const PIECE_RANKS: Record<PieceType, number> = {
-  [PieceType.GENERAL]: 6,
-  [PieceType.ADVISOR]: 5,
-  [PieceType.ELEPHANT]: 4,
-  [PieceType.CHARIOT]: 3,
-  [PieceType.HORSE]: 2,
-  [PieceType.CANNON]: 1,
-  [PieceType.SOLDIER]: 0,
+// --- Constants & Config ---
+
+export const STACK_LIMITS: Record<PieceType, number> = {
+  [PieceType.SOLDIER]: 12,
+  [PieceType.GENERAL]: 2, // When General is the base
+  [PieceType.ADVISOR]: 6,
+  [PieceType.ELEPHANT]: 6,
+  [PieceType.CHARIOT]: 6,
+  [PieceType.HORSE]: 6,
+  [PieceType.CANNON]: 6,
 };
 
-// Initial distribution counts
+// Initial distribution counts (Total 32)
 export const INITIAL_PIECE_COUNTS: Record<PieceType, number> = {
   [PieceType.GENERAL]: 1,
   [PieceType.ADVISOR]: 2,
