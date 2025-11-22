@@ -10,6 +10,7 @@ import {
   PieceStack,
   INITIAL_PIECE_COUNTS,
   STACK_LIMITS,
+  PIECE_RANKS,
   Location,
   CaptureResolution,
 } from './types';
@@ -71,6 +72,7 @@ export const initRandomGame = (): GameState => {
     winner: null,
     lastAction: null,
     error: null,
+    pendingChainCapture: null,
   };
 };
 
@@ -80,22 +82,10 @@ const isValidCoordinate = (loc: Location): boolean => {
   return loc.row >= 0 && loc.row < 4 && loc.col >= 0 && loc.col < 8;
 };
 
-const getTopPiece = (board: Board, loc: Location): PieceInstance | null => {
-  if (!isValidCoordinate(loc)) return null;
-  const stack = board[loc.row][loc.col];
-  if (!stack || stack.pieces.length === 0) return null;
-  return stack.pieces[stack.pieces.length - 1];
-};
-
 const getStackWeight = (stack: PieceStack | null): number => {
   return stack ? stack.pieces.length : 0;
 };
 
-/**
- * Returns the "Base Type" of a stack.
- * Rule: The first non-GENERAL piece from the bottom.
- * If the stack contains ONLY Generals, the base type is GENERAL.
- */
 const getStackBaseType = (pieces: PieceInstance[]): PieceType => {
   if (pieces.length === 0) throw new Error("Empty stack has no type");
   
@@ -107,65 +97,44 @@ const getStackBaseType = (pieces: PieceInstance[]): PieceType => {
   return PieceType.GENERAL;
 };
 
-/**
- * Checks if `incomingPieces` can be stacked onto `targetPieces`.
- * 
- * @param targetPieces The existing stack on board.
- * @param incomingPieces Pieces to add (can be a single piece or a whole stack).
- * @param checkColor If true, enforces strict color matching (used for Merge/Deploy). 
- *                   If false, ignores color (used for Capture-Stacking).
- */
+const getTopPiece = (stack: PieceStack | null): PieceInstance | null => {
+  if (!stack || stack.pieces.length === 0) return null;
+  return stack.pieces[stack.pieces.length - 1];
+};
+
 const canStackOn = (
   targetPieces: PieceInstance[], 
   incomingPieces: PieceInstance[],
   checkColor: boolean
 ): { valid: boolean; reason?: string } => {
-  if (targetPieces.length === 0) return { valid: true }; // Empty spot is valid (logic handled elsewhere usually)
+  if (targetPieces.length === 0) return { valid: true };
   
   const topTarget = targetPieces[targetPieces.length - 1];
-  const topIncoming = incomingPieces[incomingPieces.length - 1]; // Usually the controller
+  const topIncoming = incomingPieces[incomingPieces.length - 1];
 
-  // 1. Color Check (Only for Merge/Deploy, not Capture)
+  // 1. Color Check (Only for Merge/Deploy)
   if (checkColor) {
-    // Check top controllers
     if (topTarget.color !== topIncoming.color) {
       return { valid: false, reason: "Color mismatch" };
     }
   }
 
   // 2. Type Compatibility
-  // Incoming must be compatible with Target's Base Type.
-  // Rule: Incoming pieces must EITHER be GENERAL OR match the Target Base Type.
-  // Note: Since incoming might be a stack, we need to ensure *every* piece in incoming 
-  // respects the target's base type logic? 
-  // Actually, the prompt says: "Incoming piece... compatible with Base Type".
-  // If incoming is a stack (from Capture), does the whole stack need to match?
-  // Let's assume strict validation: Every incoming piece must be (GENERAL or BaseType).
-  
   const baseType = getStackBaseType(targetPieces);
   
-  for (const p of incomingPieces) {
-    const isCompatible = (p.type === baseType) || (p.type === PieceType.GENERAL);
-    if (!isCompatible) {
-       // Special case: If Target Base is GENERAL, then Target is ALL Generals.
-       // So any incoming piece establishes a NEW Base Type?
-       // If Base is General, it means the stack is purely Generals.
-       // If I add a Soldier, the new Base becomes Soldier.
-       // Logic: If current base is GENERAL, we can accept anything?
-       // Standard Banqi stacking usually implies you commit to a type.
-       // Let's stick to the prompt: "Either... same as Base Type... OR is GENERAL".
-       // This implies if Base is SOLDIER, I can add SOLDIER or GENERAL.
-       // If Base is GENERAL (only generals present), can I add SOLDIER?
-       // If I add Soldier to [Gen], the list becomes [Gen, Soldier]. Base is Soldier.
-       // This seems allowed.
-       if (baseType !== PieceType.GENERAL) {
+  // FIX: If the base is GENERAL, it accepts ANY friendly piece.
+  // Otherwise, incoming pieces must match base type OR be GENERAL.
+  if (baseType !== PieceType.GENERAL) {
+    for (const p of incomingPieces) {
+      const isCompatible = (p.type === baseType) || (p.type === PieceType.GENERAL);
+      if (!isCompatible) {
          return { valid: false, reason: `Type mismatch. Stack is ${baseType}, cannot add ${p.type}` };
-       }
+      }
     }
   }
 
   // 3. Limit Check
-  // We need to predict the NEW Base Type to check the limit.
+  // Check limits based on the NEW identity.
   const combined = [...targetPieces, ...incomingPieces];
   const newBase = getStackBaseType(combined);
   const limit = STACK_LIMITS[newBase];
@@ -195,6 +164,126 @@ const countPiecesBetween = (board: Board, from: Location, to: Location): number 
   return count;
 };
 
+// --- Move & Capture Validators ---
+
+/**
+ * Helper to determine if a specific move pattern is valid (ignoring interaction outcome).
+ * Returns { valid, isCannonCapture, screens }
+ */
+const getMovePatternDetails = (board: Board, from: Location, to: Location, baseType: PieceType) => {
+  const dr = to.row - from.row;
+  const dc = to.col - from.col;
+  const isLine = (from.row === to.row || from.col === to.col);
+  const dist = Math.abs(dr) + Math.abs(dc);
+
+  let valid = false;
+  let isCannonCapture = false;
+  let screens = 0;
+
+  switch (baseType) {
+    case PieceType.HORSE:
+      if (Math.abs(dr) === 1 && Math.abs(dc) === 1) valid = true;
+      break;
+    case PieceType.CHARIOT:
+      if (isLine) {
+        screens = countPiecesBetween(board, from, to);
+        if (screens === 0) valid = true;
+      }
+      break;
+    case PieceType.CANNON:
+      if (isLine) {
+        screens = countPiecesBetween(board, from, to);
+        // Cannon Move (0 screens) OR Cannon Jump (1 screen)
+        if (screens === 0 || screens === 1) {
+          valid = true;
+          if (screens === 1) isCannonCapture = true;
+        }
+      }
+      break;
+    default: // General, Advisor, Elephant, Soldier
+      if (dist === 1) valid = true;
+      break;
+  }
+  return { valid, isCannonCapture, screens };
+};
+
+/**
+ * Can the piece at 'from' capture the ENEMY at 'to'?
+ * This checks Pattern, Weight, and Rank.
+ */
+const canPieceCaptureTarget = (board: Board, from: Location, to: Location, attackerStack: PieceStack, defenderStack: PieceStack): boolean => {
+  const baseType = getStackBaseType(attackerStack.pieces);
+  const pattern = getMovePatternDetails(board, from, to, baseType);
+
+  if (!pattern.valid) return false;
+
+  // Cannon Specific:
+  // - If 1 screen (Jump): MUST be a capture.
+  // - If 0 screens (Adjacent): Can capture or move.
+  if (baseType === PieceType.CANNON) {
+     // Cannon MUST have exactly 1 screen to jump-capture?
+     // Or can it capture adjacent? 
+     // Rules update: "If jump (1 screen) ignore rank. If adjacent (0 screen) check rank."
+     // So both 0 and 1 are valid capture patterns.
+  }
+
+  // Weight Check
+  const atkWeight = getStackWeight(attackerStack);
+  const defWeight = getStackWeight(defenderStack);
+
+  if (atkWeight > defWeight) return true;
+  if (atkWeight < defWeight) return false;
+
+  // Weights Equal -> Check Rank
+  const atkTop = getTopPiece(attackerStack)!;
+  const defTop = getTopPiece(defenderStack)!;
+  const atkRank = PIECE_RANKS[atkTop.type];
+  const defRank = PIECE_RANKS[defTop.type];
+
+  // Cannon Exception: Jump ignores Rank check on tie
+  if (baseType === PieceType.CANNON && pattern.screens === 1) {
+    return true; 
+  }
+
+  // Soldier Exception: Soldier(0) beats General(6)
+  if (atkTop.type === PieceType.SOLDIER && defTop.type === PieceType.GENERAL) {
+    return true;
+  }
+  // General cannot eat Soldier (Mutually exclusive with above in Banqi cycles, usually)
+  if (atkTop.type === PieceType.GENERAL && defTop.type === PieceType.SOLDIER) {
+    return false; 
+  }
+
+  return atkRank >= defRank;
+};
+
+/**
+ * Scans for ANY valid capture from 'loc'.
+ */
+const hasChainOptions = (gameState: GameState, loc: Location, playerColor: Color): boolean => {
+  const { board } = gameState;
+  const stack = board[loc.row][loc.col];
+  if (!stack) return false;
+
+  // Naive scan
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 8; c++) {
+      if (r === loc.row && c === loc.col) continue;
+      const target = board[r][c];
+      if (target) {
+        const targetTop = getTopPiece(target);
+        if (targetTop && targetTop.faceUp && targetTop.color !== playerColor) {
+          if (canPieceCaptureTarget(board, loc, {row:r, col:c}, stack, target)) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+};
+
+
 // --- Action Handling ---
 
 export const applyAction = (state: GameState, action: PlayerAction): GameState => {
@@ -214,7 +303,33 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
   }
 
   const player = newState.players[action.playerId];
-  
+
+  // Pending Chain Capture Check
+  if (newState.pendingChainCapture) {
+    // Must be PASS or MOVE with the pending piece
+    if (action.type === ActionType.PASS) {
+      // End chain
+      newState.pendingChainCapture = null;
+      newState.activePlayerIndex = 1 - action.playerId;
+      newState.turnCount++;
+      return newState;
+    } 
+    
+    if (action.type !== ActionType.MOVE) {
+      return fail(newState, "Must Continue Chain Capture or Pass");
+    }
+
+    if (!action.from || 
+        action.from.row !== newState.pendingChainCapture.row || 
+        action.from.col !== newState.pendingChainCapture.col) {
+       return fail(newState, "Must move the chaining piece");
+    }
+  } else {
+    if (action.type === ActionType.PASS) {
+      return fail(newState, "Cannot pass when not chaining");
+    }
+  }
+
   // --- MECHANICS ---
 
   switch (action.type) {
@@ -231,12 +346,15 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
 
       // Assign Colors logic
       if (!newState.colorsAssigned) {
-        // Player who flipped gets this color
         player.color = top.color;
         const otherPlayer = newState.players[1 - action.playerId];
         otherPlayer.color = top.color === Color.RED ? Color.BLACK : Color.RED;
         newState.colorsAssigned = true;
       }
+      
+      // Flip ends turn
+      newState.activePlayerIndex = 1 - action.playerId;
+      newState.turnCount++;
       break;
     }
 
@@ -251,155 +369,109 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
       const srcStack = newState.board[from.row][from.col];
       if (!srcStack) return fail(newState, "No source");
       
-      const movingPiece = srcStack.pieces[srcStack.pieces.length - 1];
+      const movingPiece = getTopPiece(srcStack)!;
       if (!movingPiece.faceUp) return fail(newState, "Cannot move hidden");
       if (newState.colorsAssigned && movingPiece.color !== player.color) return fail(newState, "Not your piece");
 
       const destStack = newState.board[to.row][to.col];
       const baseType = getStackBaseType(srcStack.pieces);
       
-      const dr = to.row - from.row;
-      const dc = to.col - from.col;
-      const isLine = (from.row === to.row || from.col === to.col);
+      // Check Pattern
+      const pattern = getMovePatternDetails(newState.board, from, to, baseType);
+      if (!pattern.valid) return fail(newState, `Invalid move pattern for ${baseType}`);
 
-      // 1. Validate Path/Move Pattern
-      let isValidMovePattern = false;
-      let isCannonCaptureAttempt = false;
+      let moveIsCapture = false;
 
-      switch (baseType) {
-        case PieceType.HORSE:
-          // Diagonal 1 step
-          if (Math.abs(dr) === 1 && Math.abs(dc) === 1) isValidMovePattern = true;
-          break;
-        
-        case PieceType.CHARIOT:
-          // Line, No Obstacles
-          if (isLine && countPiecesBetween(newState.board, from, to) === 0) isValidMovePattern = true;
-          break;
-        
-        case PieceType.CANNON:
-          // Line. 
-          // If Move: No Obstacles. 
-          // If Capture: Exactly 1 Obstacle (Screen).
-          if (isLine) {
-            const screens = countPiecesBetween(newState.board, from, to);
-            if (destStack) {
-               // Interaction (Friendly or Enemy)
-               const topDest = destStack.pieces[destStack.pieces.length - 1];
-               const isEnemy = topDest.color !== player.color;
-               
-               if (isEnemy) {
-                 // Enemy -> Must be Capture -> Needs 1 screen
-                 if (screens === 1) {
-                   isValidMovePattern = true;
-                   isCannonCaptureAttempt = true;
-                 } else if (screens === 0) {
-                   return fail(newState, "Cannon needs a screen to capture");
-                 } else {
-                   return fail(newState, "Cannon cannot jump multiple screens");
-                 }
-               } else {
-                 // Friendly -> Merge/Stack -> Treat like Move -> 0 screens
-                 if (screens === 0) isValidMovePattern = true;
-               }
-            } else {
-              // Empty -> Move -> 0 screens
-              if (screens === 0) isValidMovePattern = true;
-            }
-          }
-          break;
-
-        default:
-          // General, Advisor, Elephant, Soldier -> Orthogonal 1 step
-          if (Math.abs(dr) + Math.abs(dc) === 1) isValidMovePattern = true;
-          break;
-      }
-
-      if (!isValidMovePattern) return fail(newState, `Invalid move pattern for ${baseType}`);
-
-      // 2. Handle Destination
       if (!destStack) {
-        // Empty
-        newState.board[to.row][to.col] = { pieces: [...srcStack.pieces] }; // Move entire stack
+        // Empty cell -> Move
+        // If chaining, only captures are allowed!
+        if (newState.pendingChainCapture) {
+          return fail(newState, "Must capture during chain");
+        }
+        
+        // Cannon cannot move if screens > 0 (Jump only for capture)
+        if (baseType === PieceType.CANNON && pattern.screens > 0) {
+          return fail(newState, "Cannon needs a target to jump");
+        }
+
+        newState.board[to.row][to.col] = { pieces: [...srcStack.pieces] };
         newState.board[from.row][from.col] = null;
-      } else {
+      } 
+      else {
         // Occupied
-        const topDest = destStack.pieces[destStack.pieces.length - 1];
+        const topDest = getTopPiece(destStack)!;
         if (!topDest.faceUp) return fail(newState, "Cannot interact with hidden pieces");
 
         if (topDest.color === player.color) {
-          // === Friendly Merge ===
-          // Check Stacking Rules (Color checked, Type, Limit)
+          // Friendly Merge
+          if (newState.pendingChainCapture) return fail(newState, "Cannot merge during chain");
+
           const check = canStackOn(destStack.pieces, srcStack.pieces, true);
           if (!check.valid) return fail(newState, `Cannot stack: ${check.reason}`);
 
-          // Merge: Attacker lands on top (Append src to dest)
           destStack.pieces.push(...srcStack.pieces);
           newState.board[from.row][from.col] = null;
+        } 
+        else {
+          // Enemy Capture
+          moveIsCapture = true;
 
-        } else {
-          // === Enemy Capture ===
-          // Weight Check
-          const atkWeight = getStackWeight(srcStack);
-          const defWeight = getStackWeight(destStack);
-
-          if (atkWeight < defWeight) {
-            // Cannon check: Even cannon follows weight rule? 
-            // "Comparison is Attacker Weight vs Target Weight... >: Eat, =: Eat, <: Cannot"
-            return fail(newState, `Attack failed: Weight ${atkWeight} vs ${defWeight}`);
+          // Validate Capture using Rank/Weight logic
+          if (!canPieceCaptureTarget(newState.board, from, to, srcStack, destStack)) {
+             return fail(newState, "Capture failed (Rank/Weight insufficient)");
           }
 
-          // Resolution
+          // Cannon Check: Jump needs exactly 1 screen. Adjacent needs 0.
+          if (baseType === PieceType.CANNON) {
+             if (pattern.screens === 0) { 
+               // Allowed (Close combat)
+             } else if (pattern.screens === 1) {
+               // Allowed (Jump)
+             } else {
+               return fail(newState, "Invalid Cannon capture");
+             }
+          }
+
+          // Execution
           if (captureRes === CaptureResolution.TO_HAND) {
-            // Harvest Enemy -> Hand
-            // 1. Convert color & Move Dest pieces to Hand
             for (const p of destStack.pieces) {
-              p.color = player.color; // Conversion
+              p.color = player.color;
               player.hand.pieces.push(p);
             }
-            // 2. Attacker takes the spot
             newState.board[to.row][to.col] = { pieces: [...srcStack.pieces] };
             newState.board[from.row][from.col] = null;
-
-          } else {
-            // Stack if Possible
-            // Check if we can add Dest(Enemy) to Src(Attacker) ? 
-            // Prompt says: "Directly stack [Captured] to [Attacking] stack". 
-            // Implies Attacker absorbs Defender.
-            // Usually: Attacker moves to Dest.
-            // So we are forming a stack at `to`?
-            // "Check if adding B (Dest) to A (Src) satisfies A's limits".
-            
-            // If valid, we put B *into* A. 
-            // Physical location: A moves to B's location.
-            // Result Stack: `[...DestPieces, ...SrcPieces]` (Attacker on Top).
-            // Validation: Check if DestPieces can validly support SrcPieces? 
-            // Or check if SrcPieces can absorb DestPieces?
-            // "Add B to A". This phrasing implies A is the base? 
-            // Let's assume the resulting physical pile at `to` has `Src` on top. 
-            // So effectively we are inserting `Dest` under `Src` or adding `Dest` to `Src`.
-            // Let's go with: Result is `[...Dest, ...Src]`. Top is Src (Active Player).
-            // Base Type Logic applies to the WHOLE new stack.
-            
+          } 
+          else {
+            // Stack capture
             const combined = [...destStack.pieces, ...srcStack.pieces];
-            // We do NOT check color for this specific mix (as per instructions)
-            // But we MUST check Type/Limit compatibility of the *combined* stack.
-            const newLimit = STACK_LIMITS[getStackBaseType(combined)];
+            const newBase = getStackBaseType(combined);
+            const limit = STACK_LIMITS[newBase];
+            if (combined.length > limit) return fail(newState, `Capture stack limit exceeded`);
             
-            if (combined.length > newLimit) {
-               return fail(newState, `Cannot Capture-Stack: Exceeds limit ${newLimit}`);
-            }
-
-            // Execute
             newState.board[to.row][to.col] = { pieces: combined };
             newState.board[from.row][from.col] = null;
           }
         }
       }
+
+      // --- Post Move: Chain Logic ---
+      // If we captured, check if we can capture again
+      if (moveIsCapture && hasChainOptions(newState, to, player.color)) {
+        newState.pendingChainCapture = to;
+        // Do NOT increment turn count or switch player
+        newState.lastAction = action; // Update last action
+      } else {
+        newState.pendingChainCapture = null;
+        newState.activePlayerIndex = 1 - action.playerId;
+        newState.turnCount++;
+      }
+
       break;
     }
 
     case ActionType.DEPLOY: {
+      if (newState.pendingChainCapture) return fail(newState, "Cannot deploy during chain");
+
       if (!action.deployTo || !action.deployType || !action.deployCount) 
         return fail(newState, "Missing deploy params");
       
@@ -407,7 +479,7 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
       if (deployCount < 1) return fail(newState, "Count must be >= 1");
       if (!isValidCoordinate(deployTo)) return fail(newState, "Invalid coords");
 
-      // 1. Check Hand
+      // Check Hand
       const availableIndices: number[] = [];
       player.hand.pieces.forEach((p, i) => {
         if (p.type === deployType) availableIndices.push(i);
@@ -416,56 +488,48 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
       if (availableIndices.length < deployCount) 
         return fail(newState, `Not enough ${deployType} in hand`);
 
-      // Take the pieces
-      // We take from the end to keep indices valid or map properly?
-      // Simplest: Filter out the pieces we want.
       const piecesToDeploy: PieceInstance[] = [];
-      // Need to remove them from hand.
-      // Let's just splice/filter. 
-      // We pick the first N matches.
       let found = 0;
       player.hand.pieces = player.hand.pieces.filter(p => {
         if (found < deployCount && p.type === deployType) {
           piecesToDeploy.push(p);
           found++;
-          return false; // remove
+          return false;
         }
-        return true; // keep
+        return true;
       });
 
-      // 2. Check Target
       const targetStack = newState.board[deployTo.row][deployTo.col];
       if (!targetStack) {
-        // Empty -> Create new
         newState.board[deployTo.row][deployTo.col] = { pieces: piecesToDeploy };
       } else {
-        // Occupied
-        const top = targetStack.pieces[targetStack.pieces.length - 1];
+        const top = getTopPiece(targetStack)!;
         if (!top.faceUp) {
-           // Restore hand (transaction rollback simulation)
            player.hand.pieces.push(...piecesToDeploy);
            return fail(newState, "Cannot deploy on hidden");
         }
-        
         if (top.color !== player.color) {
            player.hand.pieces.push(...piecesToDeploy);
            return fail(newState, "Cannot deploy on enemy");
         }
 
-        // Friendly -> Stack Check
         const check = canStackOn(targetStack.pieces, piecesToDeploy, true);
         if (!check.valid) {
            player.hand.pieces.push(...piecesToDeploy);
            return fail(newState, `Deploy failed: ${check.reason}`);
         }
 
-        // Execute
         targetStack.pieces.push(...piecesToDeploy);
       }
+
+      newState.activePlayerIndex = 1 - action.playerId;
+      newState.turnCount++;
       break;
     }
 
     case ActionType.RETRIEVE: {
+      if (newState.pendingChainCapture) return fail(newState, "Cannot retrieve during chain");
+
       if (!action.retrieveFrom || !action.retrievePieceIds) 
         return fail(newState, "Missing retrieve params");
       
@@ -473,21 +537,18 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
       const stack = newState.board[retrieveFrom.row][retrieveFrom.col];
       
       if (!stack) return fail(newState, "No stack");
-      const top = stack.pieces[stack.pieces.length - 1];
+      const top = getTopPiece(stack)!;
       if (top.color !== player.color) return fail(newState, "Not your stack");
 
       if (stack.pieces.length - retrievePieceIds.length < 1) {
         return fail(newState, "Must leave at least 1 piece");
       }
 
-      // Validate IDs exist in stack
       const stackIds = new Set(stack.pieces.map(p => p.id));
       for (const id of retrievePieceIds) {
         if (!stackIds.has(id)) return fail(newState, `Piece ${id} not in stack`);
       }
 
-      // Execute
-      // Separate pieces to keep vs retrieve
       const newStackPieces: PieceInstance[] = [];
       const retrievedPieces: PieceInstance[] = [];
 
@@ -502,18 +563,20 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
       stack.pieces = newStackPieces;
       player.hand.pieces.push(...retrievedPieces);
 
+      newState.activePlayerIndex = 1 - action.playerId;
+      newState.turnCount++;
       break;
     }
   }
 
-  // --- Post Turn Logic ---
-  newState.turnCount++;
   newState.lastAction = action;
 
-  // Win Condition Check
-  // 1. Check if Opponent has NO pieces on board (and colors are assigned)
+  // Win Condition Check (After move resolved)
+  // If currently pending chain, game is NOT over.
+  if (newState.pendingChainCapture) return newState;
+
   if (newState.colorsAssigned) {
-    const nextPlayerIdx = 1 - action.playerId; // The player who is about to move
+    const nextPlayerIdx = newState.activePlayerIndex;
     const nextPlayerColor = newState.players[nextPlayerIdx].color;
     
     let hasPieceOnBoard = false;
@@ -523,7 +586,7 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
       for (let c = 0; c < 8; c++) {
         const s = newState.board[r][c];
         if (s) {
-          const top = s.pieces[s.pieces.length - 1];
+          const top = getTopPiece(s)!;
           if (!top.faceUp) allRevealed = false;
           else if (top.color === nextPlayerColor) hasPieceOnBoard = true;
         }
@@ -531,23 +594,17 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
     }
 
     if (allRevealed && !hasPieceOnBoard) {
-      // If all pieces revealed and opponent has none, current player wins
       newState.isGameOver = true;
-      newState.winner = action.playerId;
+      newState.winner = 1 - nextPlayerIdx; // Previous player wins
       return newState;
     }
 
-    // 2. No Legal Moves Check
-    // We generate legal actions for the NEXT player
-    newState.activePlayerIndex = nextPlayerIdx; // Switch turn for check
+    // No Legal Moves Check
     const legalActions = getLegalActions(newState, nextPlayerIdx);
     if (legalActions.length === 0) {
        newState.isGameOver = true;
-       newState.winner = action.playerId; // Previous player wins
+       newState.winner = 1 - nextPlayerIdx;
     }
-  } else {
-    // Just switch turn if colors not assigned (early game)
-    newState.activePlayerIndex = 1 - action.playerId;
   }
 
   return newState;
@@ -558,24 +615,53 @@ const fail = (state: GameState, msg: string): GameState => {
   return state;
 };
 
-/**
- * Generates legal actions.
- * Optimized for "Existence" check mainly, but provides full list.
- * Note: For DEPLOY and RETRIEVE, we just generate a sample or "Any" valid move 
- * since listing every permutation of count/IDs is explosive.
- */
 export const getLegalActions = (state: GameState, playerIndex: number): PlayerAction[] => {
   const actions: PlayerAction[] = [];
   const player = state.players[playerIndex];
   
-  // 1. Flip & Move & Retrieve
+  // === CHAIN CAPTURE RESTRICTION ===
+  if (state.pendingChainCapture) {
+    // 1. Pass option
+    actions.push({ type: ActionType.PASS, playerId: playerIndex });
+    
+    // 2. Capture options from pending location ONLY
+    const { row, col } = state.pendingChainCapture;
+    const stack = state.board[row][col];
+    if (stack) {
+       // Naive scan for Valid Captures
+       for(let tr=0; tr<4; tr++) {
+         for(let tc=0; tc<8; tc++) {
+            if(tr===row && tc===col) continue;
+            const target = state.board[tr][tc];
+            // Must be Enemy
+            if (target) {
+              const tTop = getTopPiece(target);
+              if (tTop && tTop.faceUp && tTop.color !== player.color) {
+                 if (canPieceCaptureTarget(state.board, {row, col}, {row:tr, col:tc}, stack, target)) {
+                    actions.push({
+                      type: ActionType.MOVE,
+                      playerId: playerIndex,
+                      from: {row, col},
+                      to: {row: tr, col: tc},
+                      captureResolution: CaptureResolution.TO_HAND // Default to TO_HAND
+                    });
+                 }
+              }
+            }
+         }
+       }
+    }
+    return actions;
+  }
+  // =================================
+
+  // Normal Move Generation
   for (let r = 0; r < 4; r++) {
     for (let c = 0; c < 8; c++) {
       const stack = state.board[r][c];
       if (!stack) {
-        // Empty -> Deploy possible?
+        // Empty -> Deploy possible
         if (player.hand.pieces.length > 0) {
-          // Just add one sample deploy action per type available
           const typesInHand = new Set(player.hand.pieces.map(p => p.type));
           typesInHand.forEach(t => {
              actions.push({ type: ActionType.DEPLOY, playerId: playerIndex, deployTo: {row:r, col:c}, deployType: t, deployCount: 1 });
@@ -589,64 +675,55 @@ export const getLegalActions = (state: GameState, playerIndex: number): PlayerAc
       // FLIP
       if (!top.faceUp) {
         actions.push({ type: ActionType.FLIP, playerId: playerIndex, flipLocation: { row: r, col: c } });
-        continue; // Cannot move/retrieve hidden
+        continue; 
       }
 
-      // If not my piece, skip (unless I can deploy on it? No, deploy on enemy illegal)
       if (state.colorsAssigned && top.color !== player.color) continue;
       if (state.colorsAssigned && top.color === player.color) {
         
-        // RETRIEVE (Sample: Take 1 top piece if size > 1)
+        // RETRIEVE
         if (stack.pieces.length > 1) {
            actions.push({ 
              type: ActionType.RETRIEVE, 
              playerId: playerIndex, 
              retrieveFrom: {row:r, col:c}, 
-             retrievePieceIds: [stack.pieces[stack.pieces.length-2].id] // Just taking one as a check
+             retrievePieceIds: [stack.pieces[stack.pieces.length-2].id] 
            });
         }
 
-        // MOVE
-        // We simply iterate all cells to check legality. 
-        // Optimization: Only iterate relevant cells based on Type.
-        const range = (top.type === PieceType.CHARIOT || top.type === PieceType.CANNON) ? 8 : 2;
+        // MOVE & MERGE
+        const base = getStackBaseType(stack.pieces);
         
-        // Naive iteration for simplicity in this function
         for(let tr=0; tr<4; tr++) {
             for(let tc=0; tc<8; tc++) {
                if(tr===r && tc===c) continue;
                
-               // Construct a test action to validate logic
-               const testAction: PlayerAction = {
-                   type: ActionType.MOVE,
-                   playerId: playerIndex,
-                   from: {row:r, col:c},
-                   to: {row:tr, col:tc}
-               };
-               
-               // We use a lighter check or just try applyAction on a clone? 
-               // Calling applyAction is expensive but accurate.
-               // Let's do a manual check to avoid infinite loop or deep cloning overhead.
-               // Or just trust the 'fail' logic returns fast.
-               // Actually, `applyAction` does JSON clone. Doing this 32*32 times is bad.
-               // Let's just implement basic geometry check here.
-               
-               const dr = tr - r;
-               const dc = tc - c;
-               const dist = Math.abs(dr) + Math.abs(dc);
-               const isLine = (r === tr || c === tc);
-               
-               let pattern = false;
-               const base = getStackBaseType(stack.pieces);
-               
-               if (base === PieceType.HORSE) pattern = Math.abs(dr)===1 && Math.abs(dc)===1;
-               else if (base === PieceType.CHARIOT || base === PieceType.CANNON) pattern = isLine;
-               else pattern = dist === 1;
+               // Preliminary Pattern Check
+               const pattern = getMovePatternDetails(state.board, {row:r, col:c}, {row:tr, col:tc}, base);
+               if (!pattern.valid) continue;
 
-               if (pattern) {
-                   // Just pushing as candidate. The game loop will filter invalid ones if user clicks.
-                   // But for "Win Check", we need at least ONE valid one.
-                   actions.push(testAction);
+               // Target Logic
+               const target = state.board[tr][tc];
+               if (!target) {
+                 // Empty -> Move allowed unless Cannon (Cannon Move requires 0 screens, Cannon Jump requires target)
+                 if (base === PieceType.CANNON && pattern.screens > 0) continue; 
+                 actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r, col:c}, to: {row:tr, col:tc} });
+               } else {
+                 const tTop = getTopPiece(target);
+                 if (!tTop!.faceUp) continue;
+
+                 if (tTop!.color === player.color) {
+                    // Friendly Merge
+                    // We can use `canStackOn` to verify
+                    if (canStackOn(target.pieces, stack.pieces, true).valid) {
+                      actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r, col:c}, to: {row:tr, col:tc} });
+                    }
+                 } else {
+                    // Enemy Capture
+                    if (canPieceCaptureTarget(state.board, {row:r, col:c}, {row:tr, col:tc}, stack, target)) {
+                       actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r, col:c}, to: {row:tr, col:tc} });
+                    }
+                 }
                }
             }
         }
@@ -655,7 +732,12 @@ export const getLegalActions = (state: GameState, playerIndex: number): PlayerAc
         if (player.hand.pieces.length > 0) {
              const typesInHand = new Set(player.hand.pieces.map(p => p.type));
              typesInHand.forEach(t => {
-                actions.push({ type: ActionType.DEPLOY, playerId: playerIndex, deployTo: {row:r, col:c}, deployType: t, deployCount: 1 });
+                // Pre-check stack validity
+                // We mock a single piece input
+                const mockPiece = { ...player.hand.pieces.find(p => p.type === t)! };
+                if (canStackOn(stack.pieces, [mockPiece], true).valid) {
+                   actions.push({ type: ActionType.DEPLOY, playerId: playerIndex, deployTo: {row:r, col:c}, deployType: t, deployCount: 1 });
+                }
              });
         }
       }

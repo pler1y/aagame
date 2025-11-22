@@ -17,6 +17,16 @@ export enum PieceType {
   SOLDIER = 'SOLDIER', // 兵/卒
 }
 
+export const PIECE_RANKS: Record<PieceType, number> = {
+  [PieceType.GENERAL]: 6,
+  [PieceType.ADVISOR]: 5,
+  [PieceType.ELEPHANT]: 4,
+  [PieceType.CHARIOT]: 3,
+  [PieceType.HORSE]: 2,
+  [PieceType.CANNON]: 1,
+  [PieceType.SOLDIER]: 0,
+};
+
 export interface PieceInstance {
   id: string; // Unique ID
   type: PieceType;
@@ -39,6 +49,11 @@ export interface PlayerState {
   hand: HandState;
 }
 
+export interface Location {
+  row: number;
+  col: number;
+}
+
 export interface GameState {
   board: Board;
   players: [PlayerState, PlayerState];
@@ -49,6 +64,9 @@ export interface GameState {
   winner: number | null;
   lastAction: PlayerAction | null;
   error: string | null;
+  
+  // Logic for Chain Captures
+  pendingChainCapture: Location | null; // If set, active player MUST move piece at this location to Capture, or Pass
 }
 
 export enum ActionType {
@@ -56,16 +74,12 @@ export enum ActionType {
   MOVE = 'MOVE',
   DEPLOY = 'DEPLOY',
   RETRIEVE = 'RETRIEVE',
+  PASS = 'PASS', // Used to end turn during Chain Capture
 }
 
 export enum CaptureResolution {
   TO_HAND = 'TO_HAND',     // Harvest captured pieces to hand (Color Converts)
   STACK_IF_POSSIBLE = 'STACK_IF_POSSIBLE', // Stack captured pieces under attacker (No Color Convert)
-}
-
-export interface Location {
-  row: number;
-  col: number;
 }
 
 export interface PlayerAction {
