@@ -1,0 +1,5 @@
+{
+  "name": "Xiangqi Logic Engine",
+  "description": "A pure logic TypeScript engine for a two-player Chinese Chess variant with stacking and deployment mechanics.",
+  "requestFramePermissions": []
+}
