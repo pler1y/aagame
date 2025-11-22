@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { initRandomGame, applyAction, canStackOn, getStackBaseType, isValidCoordinate } from './gameEngine';
 import { 
@@ -248,8 +249,7 @@ export default function App() {
   };
 
   const attemptMove = (from: Location, to: Location) => {
-    // --- TASK 1: Dry Run for Silent Fail ---
-    // We try a TO_HAND resolution as a proxy for checking if the move is generally legal (e.g. weight check).
+    // Dry Run
     const testAction: PlayerAction = {
       type: ActionType.MOVE,
       playerId: gameState.activePlayerIndex,
@@ -257,13 +257,10 @@ export default function App() {
       to,
       captureResolution: CaptureResolution.TO_HAND
     };
-    
     const testResult = applyAction(gameState, testAction);
-    
-    // If the move is illegal (e.g. trying to eat a heavier stack), return silently.
-    if (testResult.error) return; 
+    if (testResult.error) return; // Silent fail
 
-    // Check Interaction (Occupied Cell)
+    // Check Interaction
     const targetStack = gameState.board[to.row][to.col];
     if (targetStack && targetStack.pieces.length > 0) {
        const topTarget = targetStack.pieces[targetStack.pieces.length - 1];
@@ -345,11 +342,14 @@ export default function App() {
           playerId: tempState.activePlayerIndex,
           from: currentFrom,
           to: target,
-          captureResolution: CaptureResolution.TO_HAND
+          captureResolution: CaptureResolution.TO_HAND 
        };
        
        const result = applyAction(tempState, action);
-       if (result.error) break;
+       if (result.error) {
+         console.warn("Auto chain interrupted:", result.error);
+         break;
+       }
        
        const stack = tempState.board[currentFrom.row][currentFrom.col];
 
@@ -368,6 +368,7 @@ export default function App() {
     // Push all to queue
     setAnimQueue(prev => [...prev, ...steps]);
     
+    // Cleanup UI
     setSelection(null);
     setFastChainOrigin(null);
     setFastChainTargets([]);
@@ -382,8 +383,8 @@ export default function App() {
       return;
     }
 
-    // --- TASK 2: Animation Queueing ---
     if (action.type === ActionType.MOVE && action.from && action.to) {
+      // Animate Moves
       const stack = gameState.board[action.from.row][action.from.col];
       setAnimQueue(prev => [...prev, {
         type: 'MOVE',
@@ -393,7 +394,7 @@ export default function App() {
         stackSnapshot: stack ? JSON.parse(JSON.stringify(stack)) : {pieces:[]}
       }]);
     } else {
-      // Instant Update for Flip/Deploy/Pass/Retrieve
+      // Instant Update
       setGameState(result);
       setSelection(null); 
     }
@@ -435,7 +436,7 @@ export default function App() {
         </button>
       </header>
 
-      {/* Top Player Hand */}
+      {/* Top Player (Index 0) Hand */}
       <div className="w-full max-w-2xl mb-2">
         <HandView 
            player={gameState.players[0]} 
@@ -445,7 +446,7 @@ export default function App() {
         />
       </div>
 
-      {/* Game Board */}
+      {/* Game Board Area */}
       <div className="relative">
         <BoardView 
            board={gameState.board} 
@@ -455,40 +456,11 @@ export default function App() {
            lastActionTo={gameState.lastAction?.type === ActionType.MOVE ? gameState.lastAction.to : undefined}
            pendingChainLoc={gameState.pendingChainCapture}
            activeAnim={activeAnim}
+           fastChainTargets={fastChainTargets}
+           fastChainSelected={fastChainSelected}
         />
 
-        {/* Fast Chain Highlights */}
-        {!isAnimating && (
-        <div className="absolute inset-0 pointer-events-none grid grid-cols-8 gap-1 p-2 border-4 border-transparent">
-           {gameState.board.map((row, r) => 
-              row.map((_, c) => {
-                 const isTarget = fastChainTargets.some(t => t.row === r && t.col === c);
-                 const isSelected = fastChainSelected.some(t => t.row === r && t.col === c);
-                 
-                 if (!isTarget && !isSelected) return <div key={`${r}-${c}`} />;
-
-                 return (
-                   <div key={`${r}-${c}`} className="w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center">
-                      {isTarget && !isSelected && (
-                        <div className="w-full h-full bg-emerald-400/30 rounded animate-pulse border-2 border-emerald-400 pointer-events-auto cursor-pointer"
-                             onClick={() => handleBoardClick({row: r, col: c})} 
-                        />
-                      )}
-                      {isSelected && (
-                         <div className="w-full h-full bg-emerald-500/60 rounded border-4 border-white flex items-center justify-center pointer-events-auto cursor-pointer"
-                              onClick={() => handleBoardClick({row: r, col: c})}
-                         >
-                            <span className="text-white font-bold text-xl">✓</span>
-                         </div>
-                      )}
-                   </div>
-                 )
-              })
-           )}
-        </div>
-        )}
-
-        {/* Interaction Modal */}
+        {/* Interaction Choice Modal */}
         {pendingInteraction && (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 rounded backdrop-blur-sm">
              <div className="bg-slate-800 p-4 rounded-xl border-2 border-orange-500 shadow-2xl w-64 flex flex-col gap-3 animate-in fade-in zoom-in duration-200">
@@ -560,7 +532,7 @@ export default function App() {
            </div>
         )}
 
-        {/* Fast Chain Controls */}
+        {/* Fast Chain Start Button */}
         {!fastChainOrigin && fastChainTargets.length > 0 && !pendingInteraction && !deployModal && !isChainActive && !isAnimating && (
            <div className="absolute top-2 right-2 z-30">
               <button 
@@ -572,29 +544,7 @@ export default function App() {
            </div>
         )}
 
-        {fastChainOrigin && (
-           <div className="absolute -bottom-20 left-1/2 transform -translate-x-1/2 z-30 bg-slate-800 p-3 rounded-xl border-2 border-purple-500 shadow-xl flex gap-2 items-center min-w-[250px]">
-              <div className="flex flex-col flex-1">
-                 <span className="text-purple-300 font-bold text-sm">快速连吃模式</span>
-                 <span className="text-slate-400 text-xs">已选: {fastChainSelected.length} / {fastChainTargets.length}</span>
-              </div>
-              <button 
-                 onClick={cancelFastChain}
-                 className="bg-slate-600 hover:bg-slate-500 text-white px-3 py-1 rounded text-xs"
-              >
-                 取消
-              </button>
-              <button 
-                 onClick={executeFastChain}
-                 disabled={fastChainSelected.length === 0}
-                 className={`px-3 py-1 rounded text-xs font-bold ${fastChainSelected.length > 0 ? 'bg-purple-600 hover:bg-purple-500 text-white' : 'bg-slate-700 text-slate-500'}`}
-              >
-                 确认执行
-              </button>
-           </div>
-        )}
-
-        {/* Chain Capture Overlay */}
+        {/* Chain Capture Overlay (Original) */}
         {isChainActive && !pendingInteraction && !deployModal && !isAnimating && (
            <div className="absolute -bottom-16 left-0 w-full flex flex-col items-center animate-pulse">
               <div className="bg-orange-600 text-white px-4 py-1 rounded-t font-bold text-sm">
@@ -608,7 +558,32 @@ export default function App() {
         )}
       </div>
 
-      {/* Bottom Player Hand */}
+      {/* Fast Chain Controls - MOVED OUTSIDE BOARD */}
+      {fastChainOrigin && (
+           <div className="w-full max-w-md mt-4 mb-2 z-30 bg-slate-800 p-3 rounded-xl border-2 border-purple-500 shadow-xl flex gap-2 items-center justify-between">
+              <div className="flex flex-col flex-1">
+                 <span className="text-purple-300 font-bold text-sm">快速连吃模式</span>
+                 <span className="text-slate-400 text-xs">已选: {fastChainSelected.length} / {fastChainTargets.length}</span>
+              </div>
+              <div className="flex gap-2">
+                <button 
+                   onClick={cancelFastChain}
+                   className="bg-slate-600 hover:bg-slate-500 text-white px-3 py-1 rounded text-xs"
+                >
+                   取消
+                </button>
+                <button 
+                   onClick={executeFastChain}
+                   disabled={fastChainSelected.length === 0}
+                   className={`px-3 py-1 rounded text-xs font-bold ${fastChainSelected.length > 0 ? 'bg-purple-600 hover:bg-purple-500 text-white' : 'bg-slate-700 text-slate-500'}`}
+                >
+                   确认执行
+                </button>
+              </div>
+           </div>
+      )}
+
+      {/* Bottom Player (Index 1) Hand */}
       <div className="w-full max-w-2xl mt-4 mb-8">
         <HandView 
            player={gameState.players[1]} 
@@ -618,14 +593,14 @@ export default function App() {
         />
       </div>
 
-      {/* Footer */}
+      {/* Status Footer */}
       <div className="text-center text-slate-500 text-xs">
          {gameState.colorsAssigned 
            ? `红方: ${gameState.players[0].color === Color.RED ? 'Player 0' : 'Player 1'} | 黑方: ${gameState.players[0].color === Color.BLACK ? 'Player 0' : 'Player 1'}`
            : "请翻开任意棋子以决定红黑阵营"}
       </div>
 
-      {/* Game Over */}
+      {/* Game Over Modal */}
       {gameState.isGameOver && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="bg-slate-800 p-8 rounded-2xl border-4 border-emerald-500 text-center max-w-sm w-full mx-4 shadow-2xl">
@@ -645,6 +620,7 @@ export default function App() {
           </div>
         </div>
       )}
+
     </div>
   );
 }

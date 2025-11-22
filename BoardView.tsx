@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { Board, Location, PieceStack } from './types';
 import { PieceView } from './PieceView';
@@ -11,6 +12,8 @@ interface BoardViewProps {
   lastActionTo?: Location;
   pendingChainLoc?: Location | null;
   activeAnim?: AnimationStep | null;
+  fastChainTargets?: Location[];
+  fastChainSelected?: Location[];
 }
 
 export const BoardView: React.FC<BoardViewProps> = ({ 
@@ -20,7 +23,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
   lastActionFrom,
   lastActionTo,
   pendingChainLoc,
-  activeAnim
+  activeAnim,
+  fastChainTargets = [],
+  fastChainSelected = []
 }) => {
   return (
     <div className="grid grid-cols-8 gap-1 bg-amber-200 p-2 rounded shadow-2xl border-4 border-amber-800 relative">
@@ -35,6 +40,10 @@ export const BoardView: React.FC<BoardViewProps> = ({
                 
                 // Chain Capture Highlight
                 const isPendingChain = pendingChainLoc?.row === r && pendingChainLoc?.col === c;
+
+                // Fast Chain Highlights
+                const isFastChainTarget = fastChainTargets.some(t => t.row === r && t.col === c);
+                const isFastChainSelected = fastChainSelected.some(t => t.row === r && t.col === c);
 
                 let bgClass = 'bg-amber-200'; // Default cell
                 if (isFrom) bgClass = 'bg-yellow-200/50';
@@ -55,13 +64,25 @@ export const BoardView: React.FC<BoardViewProps> = ({
                         flex items-center justify-center 
                         relative border border-amber-700/30 rounded
                         ${bgClass}
+                        cursor-pointer
                       `}
                     >
+                        {/* Render Stack */}
                         {stack && !shouldHideStack && (
                             <PieceView 
                                 stack={stack} 
                                 isSelected={isSelected}
                             />
+                        )}
+
+                        {/* Fast Chain Overlays (Rendered inside cell for perfect alignment) */}
+                        {isFastChainTarget && !isFastChainSelected && (
+                           <div className="absolute inset-0 bg-emerald-400/30 rounded animate-pulse border-2 border-emerald-400 pointer-events-none z-20" />
+                        )}
+                        {isFastChainSelected && (
+                           <div className="absolute inset-0 bg-emerald-500/60 rounded border-4 border-white flex items-center justify-center pointer-events-none z-20">
+                              <span className="text-white font-bold text-xl">✓</span>
+                           </div>
                         )}
                     </div>
                 );
@@ -101,37 +122,12 @@ const AnimatedPiece: React.FC<{from: Location, to: Location, stack: PieceStack}>
      });
   }, [to]);
 
-  // Calculate percentage positions
-  // Grid is 4 rows (25% each), 8 cols (12.5% each).
-  // We add a slight offset to center visually if needed, but assuming grid aligns:
-  // top = row * 25%, left = col * 12.5%
-  // But we are inside the container which includes padding (p-2 = 0.5rem).
-  // The gap is 1 unit (0.25rem).
-  // Precise CSS alignment with calc is:
-  // cell width = 12.5% of container content area? No.
-  // Using pure percentages for translation is robust enough for a game UI.
-  
-  const getStyle = (loc: Location) => ({
-    top: `calc(${loc.row * 25}% + 0.5rem)`,
-    left: `calc(${loc.col * 12.5}% + 0.5rem)`,
-  });
-
-  // We animate by setting initial position then transforming?
-  // Or just changing top/left? Changing top/left triggers layout, transform is cheaper.
-  // Let's use transform.
-  
-  // Initial absolute position at TOP LEFT (0,0) + translate to `from`?
-  // Easier: Start at `from` using top/left, then translate to delta.
-  // Delta X = (to.col - from.col) * 12.5% ? Not exactly due to gaps.
-  // Let's just interpolate top/left directly. Modern browsers handle it fine for simple UIs.
-  
   return (
     <div 
        className="w-[12.5%] h-[25%] flex items-center justify-center transition-all duration-300 ease-out absolute"
        style={{
           top: `calc(${pos.row * 25}% + 0.5rem)`,
           left: `calc(${pos.col * 12.5}% + 0.5rem)`,
-          // Using calc with % + 0.5rem padding is a good approximation for the grid
        }}
     >
        <div className="scale-110 shadow-2xl z-50">
