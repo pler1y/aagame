@@ -196,7 +196,7 @@ const getMovePatternDetails = (board: Board, from: Location, to: Location, baseT
     case PieceType.CANNON:
       if (isLine) {
         screens = countPiecesBetween(board, from, to);
-        // Cannon Move (0 screens) OR Cannon Jump (1 screen)
+        // Cannon Move (0 screens) OR Cannon Interaction (1 screen)
         if (screens === 0 || screens === 1) {
           valid = true;
           if (screens === 1) isCannonCapture = true;
@@ -214,12 +214,20 @@ const getMovePatternDetails = (board: Board, from: Location, to: Location, baseT
  * Can the piece at 'from' interact with the target at 'to'?
  * - If Enemy: Checks Weight >= Weight.
  * - If Friend: Always true (assuming pattern is valid), because we can Retrieve/Merge.
+ * 
+ * CRITICAL: For CANNON, this MUST check that screens === 1. 
+ * Because this function implies "Target Exists" (Interaction).
  */
 const canPieceCaptureTarget = (board: Board, from: Location, to: Location, attackerStack: PieceStack, defenderStack: PieceStack): boolean => {
   const baseType = getStackBaseType(attackerStack.pieces);
   const pattern = getMovePatternDetails(board, from, to, baseType);
 
   if (!pattern.valid) return false;
+
+  // CANNON RULE FIX: For any interaction (Friend or Foe), Cannon needs exactly 1 screen
+  if (baseType === PieceType.CANNON && pattern.screens !== 1) {
+    return false;
+  }
 
   const atkTop = getTopPiece(attackerStack)!;
   const defTop = getTopPiece(defenderStack)!;
@@ -241,6 +249,10 @@ const hasChainOptions = (gameState: GameState, loc: Location, playerColor: Color
   const { board } = gameState;
   const stack = board[loc.row][loc.col];
   if (!stack) return false;
+  
+  // SOLDIER CHAIN RESTRICTION: Soldiers cannot chain capture
+  const baseType = getStackBaseType(stack.pieces);
+  if (baseType === PieceType.SOLDIER) return false;
 
   for (let r = 0; r < 4; r++) {
     for (let c = 0; c < 8; c++) {
@@ -369,7 +381,7 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
         
         // Cannon cannot move if screens > 0 (Jump only for capture)
         if (baseType === PieceType.CANNON && pattern.screens > 0) {
-          return fail(newState, "炮移动时不能跨子 (Cannon needs a target to jump)");
+          return fail(newState, "炮移动到空位时不能跨子 (Cannon needs 0 screens to move to empty)");
         }
 
         newState.board[to.row][to.col] = { pieces: [...srcStack.pieces] };
@@ -381,6 +393,11 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
         if (!topDest.faceUp) return fail(newState, "Cannot interact with hidden pieces");
 
         moveIsInteraction = true;
+
+        // CANNON CHECK: Must have screen for any interaction
+        if (baseType === PieceType.CANNON && pattern.screens !== 1) {
+            return fail(newState, "炮必须隔一个棋子才能攻击或互动 (Cannon needs exactly 1 screen to interact)");
+        }
         
         const isFriendly = topDest.color === player.color;
 
@@ -388,18 +405,15 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
 
         if (captureRes === CaptureResolution.TO_HAND) {
             // CASE: "To Hand"
-            // If Enemy: Standard Capture.
-            // If Friend: "Retrieve Friend" (Eat friendly to save/chain).
             
             if (!isFriendly) {
                // Check Enemy Capture Validity (Weight only)
+               // Note: canPieceCaptureTarget handles Cannon screen check too, but we added explicit check above for clarity/UI safety
                if (!canPieceCaptureTarget(newState.board, from, to, srcStack, destStack)) {
                    const atkWeight = getStackWeight(srcStack);
                    const defWeight = getStackWeight(destStack);
                    return fail(newState, `层数不足：我方(${atkWeight}) vs 敌方(${defWeight})`);
                }
-               // Cannon Check
-               if (baseType === PieceType.CANNON && pattern.screens > 1) return fail(newState, "Invalid Cannon capture");
             }
 
             // Execute "To Hand" (Works for both Enemy and Friend)
@@ -413,8 +427,6 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
 
         } else {
             // CASE: "Stack"
-            // If Enemy: "Stack Capture" (Crush them).
-            // If Friend: "Merge" (Join forces).
 
             // Check Stack Validity
             const stackCheck = canStackOn(destStack.pieces, srcStack.pieces, isFriendly);
@@ -427,8 +439,6 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
                    const defWeight = getStackWeight(destStack);
                    return fail(newState, `层数不足：我方(${atkWeight}) vs 敌方(${defWeight})`);
                 }
-                // Cannon Check
-                if (baseType === PieceType.CANNON && pattern.screens > 1) return fail(newState, "Invalid Cannon capture");
             }
 
             // Execute Stack
@@ -441,9 +451,9 @@ export const applyAction = (state: GameState, action: PlayerAction): GameState =
       // --- Post Move: Chain Logic ---
       // If we interacted (Captured/Merged/Retrieved), check if we can do it again!
       const resultingStack = newState.board[to.row][to.col];
-      // Check identity of the new stack. If it is SOLDIER, chaining is forbidden.
       const resultingBaseType = resultingStack ? getStackBaseType(resultingStack.pieces) : PieceType.SOLDIER;
 
+      // SOLDIER CANNOT CHAIN
       if (moveIsInteraction && resultingBaseType !== PieceType.SOLDIER && hasChainOptions(newState, to, player.color)) {
         newState.pendingChainCapture = to;
         newState.lastAction = action; 
@@ -708,6 +718,9 @@ export const getLegalActions = (state: GameState, playerIndex: number): PlayerAc
              if (!targetTop.faceUp) continue; // Cannot interact with hidden
 
              // Interaction (Capture or Merge)
+             // CANNON CHECK: Must have screen for any interaction
+             if (baseType === PieceType.CANNON && pattern.screens !== 1) continue;
+
              const isFriendly = targetTop.color === player.color;
 
              if (isFriendly) {
