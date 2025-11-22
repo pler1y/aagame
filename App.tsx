@@ -30,7 +30,6 @@ type DeployModalState = {
 export default function App() {
   const [gameState, setGameState] = useState<GameState>(initRandomGame());
   const [selection, setSelection] = useState<Selection>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   // State for Interaction Modal (Capture or Merge)
   const [pendingInteraction, setPendingInteraction] = useState<{from: Location, to: Location, isFriendly: boolean} | null>(null);
@@ -40,14 +39,6 @@ export default function App() {
 
   const activePlayer = gameState.players[gameState.activePlayerIndex];
   const isChainActive = !!gameState.pendingChainCapture;
-
-  // Reset error after 3s
-  useEffect(() => {
-    if (errorMsg) {
-      const t = setTimeout(() => setErrorMsg(null), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [errorMsg]);
 
   const handleBoardClick = (loc: Location) => {
     // If Modal is open, block board interaction
@@ -92,7 +83,6 @@ export default function App() {
 
       // Select Logic (Own pieces only)
       if (gameState.colorsAssigned && top.color !== activePlayer.color) {
-        triggerError("这不是你的棋子！");
         return;
       }
       
@@ -216,16 +206,13 @@ export default function App() {
     const newState = applyAction(gameState, action);
     
     if (newState.error) {
-      triggerError(newState.error);
+      // Silent failure, just log to console for debugging
+      console.warn(newState.error);
     } else {
       setGameState(newState);
       // Clear selection on success, EXCEPT if chain capture started
       setSelection(null); 
     }
-  };
-
-  const triggerError = (msg: string) => {
-    setErrorMsg(msg);
   };
 
   const handleRestart = () => {
@@ -234,7 +221,6 @@ export default function App() {
        setSelection(null);
        setPendingInteraction(null);
        setDeployModal(null);
-       setErrorMsg(null);
     }
   }
 
@@ -291,13 +277,6 @@ export default function App() {
            lastActionTo={toLoc}
            pendingChainLoc={gameState.pendingChainCapture}
         />
-
-        {/* Error Toast */}
-        {errorMsg && (
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-red-600 text-white px-6 py-3 rounded-lg shadow-xl z-50 animate-bounce font-bold border-2 border-white text-center whitespace-nowrap">
-             {errorMsg}
-          </div>
-        )}
 
         {/* Interaction Choice Modal */}
         {pendingInteraction && (
