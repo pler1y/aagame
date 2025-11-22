@@ -134,13 +134,16 @@ export default function App() {
         
         if (result.error) break;
 
-        // Only allow moves that sustain the chain
+        // Valid Move! Add to targets regardless of whether chain continues or ends here.
+        targets.push(nextLoc);
+
+        // If this move doesn't result in a pending chain, we stop scanning THIS direction,
+        // but we keep the target we just added (it's a valid terminal move).
         if (!result.pendingChainCapture) {
            break;
         }
-
-        targets.push(nextLoc);
         
+        // Chain continues
         tempState = result;
         currentPos = nextLoc; 
       }
@@ -570,7 +573,7 @@ export default function App() {
         )}
 
         {fastChainOrigin && (
-           <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 z-30 bg-slate-800 p-3 rounded-xl border-2 border-purple-500 shadow-xl flex gap-2 items-center min-w-[250px]">
+           <div className="absolute -bottom-20 left-1/2 transform -translate-x-1/2 z-30 bg-slate-800 p-3 rounded-xl border-2 border-purple-500 shadow-xl flex gap-2 items-center min-w-[250px]">
               <div className="flex flex-col flex-1">
                  <span className="text-purple-300 font-bold text-sm">快速连吃模式</span>
                  <span className="text-slate-400 text-xs">已选: {fastChainSelected.length} / {fastChainTargets.length}</span>
