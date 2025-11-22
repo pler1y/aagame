@@ -1,5 +1,6 @@
+
 import React, { useState, useEffect } from 'react';
-import { initRandomGame, applyAction, getLegalActions } from './gameEngine';
+import { initRandomGame, applyAction, canStackOn } from './gameEngine';
 import { 
   GameState, 
   ActionType, 
@@ -7,8 +8,7 @@ import {
   PieceType, 
   PlayerAction, 
   CaptureResolution, 
-  Color,
-  PieceInstance
+  Color
 } from './types';
 import { BoardView } from './BoardView';
 import { HandView } from './HandView';
@@ -24,8 +24,9 @@ export default function App() {
   const [selection, setSelection] = useState<Selection>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // State for Capture Modal
-  const [pendingCapture, setPendingCapture] = useState<{from: Location, to: Location} | null>(null);
+  // State for Interaction Modal (Capture or Merge)
+  // Stores from/to and whether the target is friendly
+  const [pendingInteraction, setPendingInteraction] = useState<{from: Location, to: Location, isFriendly: boolean} | null>(null);
 
   const activePlayer = gameState.players[gameState.activePlayerIndex];
   const isChainActive = !!gameState.pendingChainCapture;
@@ -40,7 +41,7 @@ export default function App() {
 
   const handleBoardClick = (loc: Location) => {
     // If Modal is open, block board interaction
-    if (pendingCapture) return;
+    if (pendingInteraction) return;
 
     // 1. Chain Capture Lock (连吃锁定)
     if (isChainActive) {
@@ -113,7 +114,7 @@ export default function App() {
   };
 
   const handleHandSelect = (type: PieceType) => {
-    if (isChainActive || pendingCapture) return;
+    if (isChainActive || pendingInteraction) return;
     
     if (selection?.type === 'HAND' && selection.pieceType === type) {
       setSelection(null); // Toggle off
@@ -123,7 +124,7 @@ export default function App() {
   };
 
   const handlePass = () => {
-    if (!isChainActive || pendingCapture) return;
+    if (!isChainActive || pendingInteraction) return;
     executeAction({
       type: ActionType.PASS,
       playerId: gameState.activePlayerIndex
@@ -134,54 +135,50 @@ export default function App() {
   const attemptMove = (from: Location, to: Location) => {
     const targetStack = gameState.board[to.row][to.col];
     
-    let isEnemyCapture = false;
+    // Interaction check
     if (targetStack && targetStack.pieces.length > 0) {
        const topTarget = targetStack.pieces[targetStack.pieces.length - 1];
-       // If target is face up AND enemy color
-       if (topTarget.faceUp && gameState.colorsAssigned && topTarget.color !== activePlayer.color) {
-          isEnemyCapture = true;
+       
+       if (topTarget.faceUp) {
+         const isFriendly = gameState.colorsAssigned && topTarget.color === activePlayer.color;
+         // Open Modal for ANY non-empty target (Friend or Foe)
+         setPendingInteraction({ from, to, isFriendly });
+         return;
        }
     }
 
-    if (isEnemyCapture) {
-      // Open Modal
-      setPendingCapture({ from, to });
-    } else {
-      // Normal Move or Friendly Merge (Engine handles merge logic)
-      executeAction({
-        type: ActionType.MOVE,
-        playerId: gameState.activePlayerIndex,
-        from,
-        to,
-        captureResolution: CaptureResolution.TO_HAND // Default value, won't be used for merges
-      });
-    }
+    // Move to empty space
+    executeAction({
+      type: ActionType.MOVE,
+      playerId: gameState.activePlayerIndex,
+      from,
+      to,
+      captureResolution: CaptureResolution.TO_HAND // Irrelevant for empty space
+    });
   };
 
-  const confirmCapture = (resolution: CaptureResolution) => {
-    if (!pendingCapture) return;
+  const confirmInteraction = (resolution: CaptureResolution) => {
+    if (!pendingInteraction) return;
     
     executeAction({
       type: ActionType.MOVE,
       playerId: gameState.activePlayerIndex,
-      from: pendingCapture.from,
-      to: pendingCapture.to,
+      from: pendingInteraction.from,
+      to: pendingInteraction.to,
       captureResolution: resolution
     });
     
-    setPendingCapture(null);
+    setPendingInteraction(null);
   };
 
-  const cancelCapture = () => {
-    setPendingCapture(null);
-    // Do not clear selection, allow user to choose different target
+  const cancelInteraction = () => {
+    setPendingInteraction(null);
   };
 
   const executeAction = (action: PlayerAction) => {
     const newState = applyAction(gameState, action);
     
     if (newState.error) {
-      // Basic translation of engine errors could go here if needed
       triggerError(newState.error);
     } else {
       setGameState(newState);
@@ -198,10 +195,21 @@ export default function App() {
     if (confirm("确定要重新开始游戏吗？")) {
        setGameState(initRandomGame());
        setSelection(null);
-       setPendingCapture(null);
+       setPendingInteraction(null);
        setErrorMsg(null);
     }
   }
+
+  // Helper to check stack validity for the UI button
+  const checkStackPossible = () => {
+    if (!pendingInteraction) return false;
+    const { from, to, isFriendly } = pendingInteraction;
+    const src = gameState.board[from.row][from.col]?.pieces || [];
+    const dest = gameState.board[to.row][to.col]?.pieces || [];
+    
+    // If Friendly: checkColor = true. If Enemy: checkColor = false.
+    return canStackOn(dest, src, isFriendly).valid;
+  };
 
   // Helper for Last Action Highlight
   const lastAction = gameState.lastAction;
@@ -253,31 +261,45 @@ export default function App() {
           </div>
         )}
 
-        {/* Capture Choice Modal */}
-        {pendingCapture && (
+        {/* Interaction Choice Modal */}
+        {pendingInteraction && (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 rounded backdrop-blur-sm">
              <div className="bg-slate-800 p-4 rounded-xl border-2 border-orange-500 shadow-2xl w-64 flex flex-col gap-3 animate-in fade-in zoom-in duration-200">
-                <h3 className="text-center font-bold text-orange-400 text-lg">捕获敌方棋子!</h3>
+                <h3 className="text-center font-bold text-orange-400 text-lg">
+                  {pendingInteraction.isFriendly ? "己方互动" : "捕获敌方"}
+                </h3>
                 <p className="text-xs text-center text-slate-300 mb-2">请选择处理方式:</p>
                 
+                {/* Option A: TO_HAND (Capture or Retrieve) */}
                 <button 
-                  onClick={() => confirmCapture(CaptureResolution.TO_HAND)}
+                  onClick={() => confirmInteraction(CaptureResolution.TO_HAND)}
                   className="bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded font-bold text-sm flex flex-col items-center"
                 >
-                  <span>收为己用</span>
-                  <span className="text-[10px] font-normal opacity-80">(变色并入手牌)</span>
+                  <span>{pendingInteraction.isFriendly ? "回收连吃" : "收为己用"}</span>
+                  <span className="text-[10px] font-normal opacity-80">
+                    {pendingInteraction.isFriendly 
+                      ? "(收回此子，可继续连吃)" 
+                      : "(变色并入手牌)"}
+                  </span>
                 </button>
 
-                <button 
-                  onClick={() => confirmCapture(CaptureResolution.STACK_IF_POSSIBLE)}
-                  className="bg-blue-600 hover:bg-blue-500 text-white py-2 rounded font-bold text-sm flex flex-col items-center"
-                >
-                  <span>镇压叠加</span>
-                  <span className="text-[10px] font-normal opacity-80">(直接叠在下方)</span>
-                </button>
+                {/* Option B: STACK (Merge or Crush) */}
+                {checkStackPossible() && (
+                  <button 
+                    onClick={() => confirmInteraction(CaptureResolution.STACK_IF_POSSIBLE)}
+                    className="bg-blue-600 hover:bg-blue-500 text-white py-2 rounded font-bold text-sm flex flex-col items-center"
+                  >
+                    <span>{pendingInteraction.isFriendly ? "合并叠加" : "镇压叠加"}</span>
+                    <span className="text-[10px] font-normal opacity-80">
+                      {pendingInteraction.isFriendly 
+                        ? "(增加层数)" 
+                        : "(直接叠在下方)"}
+                    </span>
+                  </button>
+                )}
 
                 <button 
-                  onClick={cancelCapture}
+                  onClick={cancelInteraction}
                   className="mt-2 text-slate-400 hover:text-white text-xs underline"
                 >
                   取消操作
@@ -287,13 +309,13 @@ export default function App() {
         )}
 
         {/* Chain Capture Overlay */}
-        {isChainActive && !pendingCapture && (
+        {isChainActive && !pendingInteraction && (
            <div className="absolute -bottom-16 left-0 w-full flex flex-col items-center animate-pulse">
               <div className="bg-orange-600 text-white px-4 py-1 rounded-t font-bold text-sm">
                 触发连吃!
               </div>
               <div className="bg-slate-800 p-2 rounded-b border border-orange-500 flex gap-4 items-center shadow-lg">
-                 <span className="text-orange-300 text-sm">请继续吃子或...</span>
+                 <span className="text-orange-300 text-sm">请继续吃子/回收，或...</span>
                  <button 
                    onClick={handlePass}
                    className="bg-red-500 hover:bg-red-600 text-white px-4 py-1 rounded font-bold"
