@@ -126,7 +126,7 @@ export const canStackOn = (
   // 2. Type Compatibility
   const baseType = getStackBaseType(targetPieces);
   
-  // FIX: If the base is GENERAL, it accepts ANY friendly piece.
+  // If the base is GENERAL, it accepts ANY friendly piece.
   // Otherwise, incoming pieces must match base type OR be GENERAL.
   if (baseType !== PieceType.GENERAL) {
     for (const p of incomingPieces) {
@@ -214,7 +214,7 @@ const getMovePatternDetails = (board: Board, from: Location, to: Location, baseT
 /**
  * Can the piece at 'from' interact with the target at 'to'?
  * - If Enemy: Checks Rank/Weight.
- * - If Friend: Always true (assuming pattern is valid), because we can Retrieve.
+ * - If Friend: Always true (assuming pattern is valid), because we can Retrieve/Merge.
  */
 const canPieceCaptureTarget = (board: Board, from: Location, to: Location, attackerStack: PieceStack, defenderStack: PieceStack): boolean => {
   const baseType = getStackBaseType(attackerStack.pieces);
@@ -264,7 +264,6 @@ const hasChainOptions = (gameState: GameState, loc: Location, playerColor: Color
   const stack = board[loc.row][loc.col];
   if (!stack) return false;
 
-  // Naive scan
   for (let r = 0; r < 4; r++) {
     for (let c = 0; c < 8; c++) {
       if (r === loc.row && c === loc.col) continue;
@@ -620,28 +619,32 @@ const fail = (state: GameState, msg: string): GameState => {
   return state;
 };
 
+/**
+ * Generates all legal actions for the given player.
+ * Used mainly for "Game Over" detection (Stalemate).
+ */
 export const getLegalActions = (state: GameState, playerIndex: number): PlayerAction[] => {
   const actions: PlayerAction[] = [];
   const player = state.players[playerIndex];
-  
-  // === CHAIN CAPTURE RESTRICTION ===
+  const { board } = state;
+
+  // 1. Chain Capture Logic
   if (state.pendingChainCapture) {
-    // 1. Pass option
     actions.push({ type: ActionType.PASS, playerId: playerIndex });
-    
-    // 2. Capture options from pending location ONLY
     const { row, col } = state.pendingChainCapture;
-    const stack = state.board[row][col];
+    const stack = board[row][col];
     if (stack) {
-       // Scan for Valid Captures (Friendly or Enemy)
+       // Scan targets for that specific piece
        for(let tr=0; tr<4; tr++) {
          for(let tc=0; tc<8; tc++) {
             if(tr===row && tc===col) continue;
             const target = state.board[tr][tc];
             if (target) {
               const tTop = getTopPiece(target);
-              if (tTop && tTop.faceUp) { // Can interact with any face up piece
+              if (tTop && tTop.faceUp) { 
+                 // Can interact with any face up piece (Friendly or Enemy)
                  if (canPieceCaptureTarget(state.board, {row, col}, {row:tr, col:tc}, stack, target)) {
+                    // Add standard Capture/Retrieve action
                     actions.push({
                       type: ActionType.MOVE,
                       playerId: playerIndex,
@@ -657,10 +660,95 @@ export const getLegalActions = (state: GameState, playerIndex: number): PlayerAc
     }
     return actions;
   }
-  
-  // ... (Rest of getLegalActions omitted for brevity, similar logic applies)
-  // This function is mainly used for "No Moves" check, so the critical part is above.
-  // For full implementation, one would expand the scan below to include Friendly interactions.
-  
-  return actions; // Returning empty here is fine as long as game isn't strictly relying on this for non-endgame logic yet.
+
+  // 2. Global Scan
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 8; c++) {
+       const stack = board[r][c];
+
+       // EMPTY: Deploy
+       if (!stack) {
+         if (player.hand.pieces.length > 0) {
+             const handTypes = new Set(player.hand.pieces.map(p => p.type));
+             handTypes.forEach(t => {
+                actions.push({ 
+                    type: ActionType.DEPLOY, 
+                    playerId: playerIndex, 
+                    deployTo: {row: r, col: c}, 
+                    deployType: t, 
+                    deployCount: 1 
+                });
+             });
+         }
+         continue;
+       }
+
+       const top = stack.pieces[stack.pieces.length - 1];
+
+       // HIDDEN: Flip
+       if (!top.faceUp) {
+         actions.push({ type: ActionType.FLIP, playerId: playerIndex, flipLocation: {row: r, col: c} });
+         continue;
+       }
+
+       // FRIENDLY: Move/Retrieve
+       if (state.colorsAssigned && top.color === player.color) {
+         // Retrieve
+         if (stack.pieces.length > 1) {
+            actions.push({
+                type: ActionType.RETRIEVE,
+                playerId: playerIndex,
+                retrieveFrom: {row: r, col: c},
+                retrievePieceIds: [top.id] 
+            });
+         }
+
+         // Scan moves
+         const baseType = getStackBaseType(stack.pieces);
+         for (let tr = 0; tr < 4; tr++) {
+           for (let tc = 0; tc < 8; tc++) {
+             if (r === tr && c === tc) continue;
+
+             // Pattern check first
+             const pattern = getMovePatternDetails(board, {row:r, col:c}, {row:tr, col:tc}, baseType);
+             if (!pattern.valid) continue;
+
+             const targetStack = board[tr][tc];
+
+             // Target Empty
+             if (!targetStack) {
+               if (baseType === PieceType.CANNON && pattern.screens > 0) continue;
+               actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r,col:c}, to: {row:tr,col:tc} });
+               continue;
+             }
+
+             const targetTop = targetStack.pieces[targetStack.pieces.length - 1];
+             if (!targetTop.faceUp) continue; // Cannot interact with hidden
+
+             // Interaction (Capture or Merge)
+             const isFriendly = targetTop.color === player.color;
+
+             if (isFriendly) {
+                // Merge
+                if (canStackOn(targetStack.pieces, stack.pieces, true).valid) {
+                    actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r,col:c}, to: {row:tr,col:tc}, captureResolution: CaptureResolution.STACK_IF_POSSIBLE });
+                }
+                // Retrieve Friend (Capture to Hand) - Always possible for friends
+                actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r,col:c}, to: {row:tr,col:tc}, captureResolution: CaptureResolution.TO_HAND });
+             } else {
+                // Enemy
+                if (canPieceCaptureTarget(board, {row:r,col:c}, {row:tr,col:tc}, stack, targetStack)) {
+                     actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r,col:c}, to: {row:tr,col:tc}, captureResolution: CaptureResolution.TO_HAND });
+                     
+                     if (canStackOn(targetStack.pieces, stack.pieces, false).valid) {
+                        actions.push({ type: ActionType.MOVE, playerId: playerIndex, from: {row:r,col:c}, to: {row:tr,col:tc}, captureResolution: CaptureResolution.STACK_IF_POSSIBLE });
+                     }
+                }
+             }
+           }
+         }
+       }
+    }
+  }
+  return actions;
 };
