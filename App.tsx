@@ -83,6 +83,7 @@ export default function App() {
     setFastChainTargets([]);
     setFastChainSelected([]);
 
+    // We do NOT check !isChainActive here, so scanner runs even during chain
     if (selection?.type === 'BOARD' && !isAnimating) {
       const { row, col } = selection.loc;
       const stack = gameState.board[row][col];
@@ -533,7 +534,8 @@ export default function App() {
         )}
 
         {/* Fast Chain Start Button */}
-        {!fastChainOrigin && fastChainTargets.length > 0 && !pendingInteraction && !deployModal && !isChainActive && !isAnimating && (
+        {/* CRITICAL FIX: Removed !isChainActive from condition below */}
+        {!fastChainOrigin && fastChainTargets.length > 0 && !pendingInteraction && !deployModal && !isAnimating && (
            <div className="absolute top-2 right-2 z-30">
               <button 
                 onClick={startFastChainMode}
@@ -544,21 +546,9 @@ export default function App() {
            </div>
         )}
 
-        {/* Chain Capture Overlay (Original) */}
-        {isChainActive && !pendingInteraction && !deployModal && !isAnimating && (
-           <div className="absolute -bottom-16 left-0 w-full flex flex-col items-center animate-pulse">
-              <div className="bg-orange-600 text-white px-4 py-1 rounded-t font-bold text-sm">
-                触发连吃!
-              </div>
-              <div className="bg-slate-800 p-2 rounded-b border border-orange-500 flex gap-4 items-center shadow-lg">
-                 <span className="text-orange-300 text-sm">请继续吃子/回收，或...</span>
-                 <button onClick={handlePass} className="bg-red-500 hover:bg-red-600 text-white px-4 py-1 rounded font-bold">跳过</button>
-              </div>
-           </div>
-        )}
       </div>
 
-      {/* Fast Chain Controls - MOVED OUTSIDE BOARD */}
+      {/* Fast Chain Controls - OUTSIDE BOARD */}
       {fastChainOrigin && (
            <div className="w-full max-w-md mt-4 mb-2 z-30 bg-slate-800 p-3 rounded-xl border-2 border-purple-500 shadow-xl flex gap-2 items-center justify-between">
               <div className="flex flex-col flex-1">
@@ -579,6 +569,19 @@ export default function App() {
                 >
                    确认执行
                 </button>
+              </div>
+           </div>
+      )}
+
+      {/* Chain Capture Overlay - MOVED OUTSIDE BOARD */}
+      {isChainActive && !pendingInteraction && !deployModal && !isAnimating && (
+           <div className="w-full max-w-md mt-2 mb-2 flex flex-col items-center animate-pulse">
+              <div className="bg-orange-600 text-white px-4 py-1 rounded-t font-bold text-sm w-full text-center">
+                触发连吃!
+              </div>
+              <div className="bg-slate-800 p-2 rounded-b border border-orange-500 flex gap-4 items-center justify-center shadow-lg w-full">
+                 <span className="text-orange-300 text-sm">请继续吃子/回收，或...</span>
+                 <button onClick={handlePass} className="bg-red-500 hover:bg-red-600 text-white px-4 py-1 rounded font-bold text-xs">跳过</button>
               </div>
            </div>
       )}
