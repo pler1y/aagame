@@ -14,6 +14,15 @@ import {
 import { BoardView } from './BoardView';
 import { HandView } from './HandView';
 
+// --- Constants ---
+const SUPPORTS_CHAIN_CAPTURE = new Set<PieceType>([
+  PieceType.CHARIOT,
+  PieceType.HORSE,
+  PieceType.CANNON,
+  PieceType.ADVISOR,
+  PieceType.ELEPHANT,
+]);
+
 // Selection State
 type Selection = 
   | { type: 'BOARD'; loc: Location }
@@ -77,98 +86,181 @@ export default function App() {
 
   }, [animQueue, activeAnim]);
 
-  // --- Chariot Chain Scanner ---
-  useEffect(() => {
-    if (fastChainOrigin) return;
-    setFastChainTargets([]);
-    setFastChainSelected([]);
+  // --- Helper: Simulate Fast Chain Path ---
+  const simulateFastChain = (
+    baseState: GameState,
+    origin: Location,
+    path: Location[]
+  ): { state: GameState; currentLoc: Location } | null => {
+    let tempState = JSON.parse(JSON.stringify(baseState));
+    let currentLoc = origin;
+  
+    for (const target of path) {
+      const action: PlayerAction = {
+        type: ActionType.MOVE,
+        playerId: tempState.activePlayerIndex,
+        from: currentLoc,
+        to: target,
+        captureResolution: CaptureResolution.TO_HAND
+      };
+      
+      const result = applyAction(tempState, action);
+      if (result.error) return null; 
+      
+      tempState = result;
+      currentLoc = target;
+    }
+    return { state: tempState, currentLoc };
+  };
 
-    // We do NOT check !isChainActive here, so scanner runs even during chain
+  // --- Helper: Get Candidate Steps based on Piece Type ---
+  const getCandidateStepsForPiece = (state: GameState, from: Location, type: PieceType): Location[] => {
+    const candidates: Location[] = [];
+    const { board } = state;
+
+    if (type === PieceType.CHARIOT) {
+      const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+      directions.forEach(([dr, dc]) => {
+        for (let i = 1; i < 8; i++) {
+          const r = from.row + dr * i;
+          const c = from.col + dc * i;
+          if (!isValidCoordinate({row: r, col: c})) break;
+          candidates.push({row: r, col: c});
+          if (board[r][c]) break; // Chariot stops at first piece
+        }
+      });
+    } else if (type === PieceType.CANNON) {
+      const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+      directions.forEach(([dr, dc]) => {
+        for (let i = 1; i < 8; i++) {
+          const r = from.row + dr * i;
+          const c = from.col + dc * i;
+          if (!isValidCoordinate({row: r, col: c})) break;
+          // For Cannon, we consider all non-empty cells in line as potential interaction targets.
+          // applyAction will rigorously enforce the "exactly one screen" rule.
+          if (board[r][c]) {
+             candidates.push({row: r, col: c});
+          }
+        }
+      });
+    } else if (type === PieceType.HORSE) {
+      // Diagonal 1 step
+      const offsets = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+      offsets.forEach(([dr, dc]) => {
+        const r = from.row + dr;
+        const c = from.col + dc;
+        if (isValidCoordinate({row: r, col: c})) candidates.push({row: r, col: c});
+      });
+    } else {
+      // Advisor, Elephant (Orthogonal 1 step)
+      const offsets = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+      offsets.forEach(([dr, dc]) => {
+        const r = from.row + dr;
+        const c = from.col + dc;
+        if (isValidCoordinate({row: r, col: c})) candidates.push({row: r, col: c});
+      });
+    }
+    return candidates;
+  };
+
+  // --- Unified Chain Target Calculator ---
+  const recomputeFastChainTargets = (origin: Location, path: Location[]) => {
+    // 1. Get the base piece type from the origin
+    const originStack = gameState.board[origin.row][origin.col];
+    if (!originStack || originStack.pieces.length === 0) {
+        setFastChainTargets([]);
+        return;
+    }
+    const baseType = getStackBaseType(originStack.pieces);
+
+    // 2. Simulate current state
+    const sim = simulateFastChain(gameState, origin, path);
+    if (!sim) {
+      setFastChainTargets([]);
+      return;
+    }
+
+    const { state: tempState, currentLoc } = sim;
+    
+    // 3. Get geometrical candidates
+    const candidates = getCandidateStepsForPiece(tempState, currentLoc, baseType);
+    const validTargets: Location[] = [];
+
+    // 4. Validate with applyAction
+    for (const target of candidates) {
+        const testAction: PlayerAction = {
+           type: ActionType.MOVE,
+           playerId: tempState.activePlayerIndex,
+           from: currentLoc,
+           to: target,
+           captureResolution: CaptureResolution.TO_HAND
+        };
+
+        const result = applyAction(tempState, testAction);
+        if (!result.error) {
+            validTargets.push(target);
+        }
+    }
+
+    setFastChainTargets(validTargets);
+  };
+
+  // --- Effect: Auto-Recalculate Targets ---
+  useEffect(() => {
+    // Mode 1: Active Fast Chain Mode (or just updated path)
+    if (fastChainOrigin) {
+      recomputeFastChainTargets(fastChainOrigin, fastChainSelected);
+      return;
+    }
+
+    // Mode 2: Passive Scan (Show button if targets exist for selected piece)
     if (selection?.type === 'BOARD' && !isAnimating) {
       const { row, col } = selection.loc;
       const stack = gameState.board[row][col];
       if (stack && stack.pieces.length > 0) {
         const baseType = getStackBaseType(stack.pieces);
-        if (baseType === PieceType.CHARIOT) {
-          calculateChariotChainTargets(selection.loc);
+        if (SUPPORTS_CHAIN_CAPTURE.has(baseType)) {
+          recomputeFastChainTargets(selection.loc, []);
+        } else {
+          setFastChainTargets([]);
         }
+      } else {
+        setFastChainTargets([]);
       }
+    } else {
+      setFastChainTargets([]);
     }
-  }, [selection, gameState, fastChainOrigin, isAnimating]);
+  }, [selection, gameState, fastChainOrigin, fastChainSelected, isAnimating]);
 
-  const calculateChariotChainTargets = (startLoc: Location) => {
-    const targets: Location[] = [];
-    const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]]; // R, L, D, U
-
-    directions.forEach(([dr, dc]) => {
-      let tempState = JSON.parse(JSON.stringify(gameState)); // Deep copy
-      let currentPos = { ...startLoc };
-      
-      // Scan outwards
-      for (let i = 1; i < 8; i++) {
-        const nextRow = currentPos.row + dr;
-        const nextCol = currentPos.col + dc;
-        const nextLoc = { row: nextRow, col: nextCol };
-
-        if (!isValidCoordinate(nextLoc)) break;
-
-        const targetStack = tempState.board[nextRow][nextCol];
-
-        // Empty space: Chariot slides through
-        if (!targetStack) {
-           currentPos = nextLoc; 
-           continue;
-        }
-
-        const top = targetStack.pieces[targetStack.pieces.length - 1];
-        if (!top.faceUp) break; // Blocked by hidden piece
-
-        // Dry Run using ApplyAction to check validity
-        const testAction: PlayerAction = {
-           type: ActionType.MOVE,
-           playerId: tempState.activePlayerIndex,
-           from: currentPos,
-           to: nextLoc,
-           captureResolution: CaptureResolution.TO_HAND
-        };
-
-        const result = applyAction(tempState, testAction);
-        
-        if (result.error) break;
-
-        // Valid Move! Add to targets regardless of whether chain continues or ends here.
-        targets.push(nextLoc);
-
-        // If this move doesn't result in a pending chain, we stop scanning THIS direction,
-        // but we keep the target we just added (it's a valid terminal move).
-        if (!result.pendingChainCapture) {
-           break;
-        }
-        
-        // Chain continues
-        tempState = result;
-        currentPos = nextLoc; 
-      }
-    });
-
-    setFastChainTargets(targets);
-  };
 
   const handleBoardClick = (loc: Location) => {
-    if (isAnimating) return; // Block input during animation
+    if (isAnimating) return; 
     if (pendingInteraction || deployModal) return;
 
-    // Fast Chain Selection logic
+    // --- Fast Chain Selection Logic ---
     if (fastChainOrigin) {
-      const isTarget = fastChainTargets.some(t => t.row === loc.row && t.col === loc.col);
-      if (isTarget) {
-        const alreadySelected = fastChainSelected.some(s => s.row === loc.row && s.col === loc.col);
-        if (alreadySelected) {
-          setFastChainSelected(fastChainSelected.filter(s => s.row !== loc.row || s.col !== loc.col));
-        } else {
-          setFastChainSelected([...fastChainSelected, loc]);
-        }
+      // 1. Append next target
+      const isNextTarget = fastChainTargets.some(t => t.row === loc.row && t.col === loc.col);
+      if (isNextTarget) {
+        setFastChainSelected([...fastChainSelected, loc]);
+        return;
       }
+
+      // 2. Backtrack last step
+      const lastSelected = fastChainSelected.length > 0 ? fastChainSelected[fastChainSelected.length - 1] : null;
+      const isLastSelected = lastSelected && lastSelected.row === loc.row && lastSelected.col === loc.col;
+      if (isLastSelected) {
+        setFastChainSelected(fastChainSelected.slice(0, -1));
+        return;
+      }
+
+      // 3. Safe Exit (Deadlock Fix)
+      // If clicking elsewhere or origin, and not a valid target/backtrack -> Exit mode
+      setFastChainOrigin(null);
+      setFastChainSelected([]);
+      setFastChainTargets([]);
+      // Optional: If they clicked the origin, just deselect. If they clicked another piece, maybe select it?
+      // For simplicity, we just exit Fast Chain mode.
       return;
     }
 
@@ -233,7 +325,15 @@ export default function App() {
   };
 
   const handleHandSelect = (type: PieceType) => {
-    if (isAnimating || isChainActive || pendingInteraction || deployModal || fastChainOrigin) return;
+    // Clear fast chain state if user tries to interact with hand
+    if (fastChainOrigin) {
+        setFastChainOrigin(null);
+        setFastChainSelected([]);
+        setFastChainTargets([]);
+    }
+
+    if (isAnimating || isChainActive || pendingInteraction || deployModal) return;
+    
     if (selection?.type === 'HAND' && selection.pieceType === type) {
       setSelection(null); 
     } else {
@@ -323,21 +423,14 @@ export default function App() {
   };
 
   const executeFastChain = () => {
-    if (!fastChainOrigin) return;
+    if (!fastChainOrigin || fastChainSelected.length === 0) return;
     
-    // Sort targets by distance
-    const sortedTargets = [...fastChainSelected].sort((a, b) => {
-       const distA = Math.abs(a.row - fastChainOrigin.row) + Math.abs(a.col - fastChainOrigin.col);
-       const distB = Math.abs(b.row - fastChainOrigin.row) + Math.abs(b.col - fastChainOrigin.col);
-       return distA - distB;
-    });
-
     let tempState = gameState;
     let currentFrom = fastChainOrigin;
     const steps: AnimationStep[] = [];
 
-    // Pre-calculate all steps
-    for (const target of sortedTargets) {
+    // SEQUENTIAL EXECUTION
+    for (const target of fastChainSelected) {
        const action: PlayerAction = {
           type: ActionType.MOVE,
           playerId: tempState.activePlayerIndex,
@@ -348,7 +441,7 @@ export default function App() {
        
        const result = applyAction(tempState, action);
        if (result.error) {
-         console.warn("Auto chain interrupted:", result.error);
+         console.warn("Auto chain execution interrupted:", result.error);
          break;
        }
        
@@ -366,7 +459,6 @@ export default function App() {
        currentFrom = target;
     }
 
-    // Push all to queue
     setAnimQueue(prev => [...prev, ...steps]);
     
     // Cleanup UI
@@ -378,6 +470,13 @@ export default function App() {
 
   // Unified Action Handler
   const queueAction = (action: PlayerAction) => {
+    // Cleanup fast chain if any other action is queued
+    if (fastChainOrigin) {
+        setFastChainOrigin(null);
+        setFastChainSelected([]);
+        setFastChainTargets([]);
+    }
+
     const result = applyAction(gameState, action);
     if (result.error) {
       console.warn(result.error);
@@ -534,7 +633,6 @@ export default function App() {
         )}
 
         {/* Fast Chain Start Button */}
-        {/* CRITICAL FIX: Removed !isChainActive from condition below */}
         {!fastChainOrigin && fastChainTargets.length > 0 && !pendingInteraction && !deployModal && !isAnimating && (
            <div className="absolute top-2 right-2 z-30">
               <button 
@@ -553,7 +651,7 @@ export default function App() {
            <div className="w-full max-w-md mt-4 mb-2 z-30 bg-slate-800 p-3 rounded-xl border-2 border-purple-500 shadow-xl flex gap-2 items-center justify-between">
               <div className="flex flex-col flex-1">
                  <span className="text-purple-300 font-bold text-sm">快速连吃模式</span>
-                 <span className="text-slate-400 text-xs">已选: {fastChainSelected.length} / {fastChainTargets.length}</span>
+                 <span className="text-slate-400 text-xs">已选: {fastChainSelected.length}</span>
               </div>
               <div className="flex gap-2">
                 <button 
